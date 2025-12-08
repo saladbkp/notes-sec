@@ -119,6 +119,22 @@ share 和 delete button 是一个 emoji 在 左边 选 note 的 bar
 
 下一步是 改
 lock unlock status /
-还没check search regex  / auto update 是最好
+还没check search regex  / auto update 是最好 x
 为什么 all note 会不见  {"error":"unauthorized"}
 
+下一步是 share note
+share feature 非常美 
+现在是 
+a send b 
+b recieve 
+a 改了 msg b 能 sync
+b 改了 a msg 也会 sync
+各自 上锁 with 自己的password 都可以 没有问题
+所以 一个 note 可以with diff lock 密码
+
+现在 中文 support
+
+还有什么吗
+security 上面 加 
+last modified time 
+last login 在 signed in 下面

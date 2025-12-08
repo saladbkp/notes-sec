@@ -10,6 +10,8 @@ const el = id => document.getElementById(id)
 let currentNoteId = null
 let searchTerm = ''
 let unlockedNoteId = null
+let pollTimer = null
+let currentNoteLastUpdate = null
 
 function b64(x) {
     return btoa(String.fromCharCode(...new Uint8Array(x)))
@@ -87,8 +89,13 @@ async function api(path, method, body) {
     const text = await r.text();
     const ct = (r.headers.get('content-type') || '').toLowerCase();
     if (ct.includes('application/json')) {
-        try { return JSON.parse(text || '{}') } catch { return { ok: false, error: 'parse_error', status: r.status, body: text } }
+        try {
+            const obj = JSON.parse(text || '{}');
+            if (obj && obj.error === 'unauthorized') { try { localStorage.removeItem('notesSession') } catch {}; location.href = '/login'; return obj }
+            return obj
+        } catch { return { ok: false, error: 'parse_error', status: r.status, body: text } }
     }
+    if (r.status === 401) { try { localStorage.removeItem('notesSession') } catch {}; location.href = '/login'; return { error: 'unauthorized' } }
     return r.ok ? { ok: true, raw: text } : { ok: false, status: r.status, body: text }
 }
 
@@ -104,6 +111,23 @@ function render() {
     const email = state.session?.email || '';
     el('statusEmail').textContent = email ? ('Signed in: ' + email) : '';
     el('logoutBtn').disabled = !logged
+}
+
+async function refreshLastLogin() {
+    const elSmall = document.getElementById('headerLastLogin');
+    if (!elSmall) return;
+    elSmall.textContent = '';
+    if (!state.session) return;
+    try {
+        const info = await api('/auth/last-login','GET');
+        if (info) {
+            const parts = [];
+            if (info.ts) { try { parts.push(new Date(info.ts).toLocaleString()) } catch { parts.push(info.ts) } }
+            if (info.ip) parts.push(info.ip);
+            if (info.ua) parts.push(info.ua);
+            elSmall.textContent = parts.length ? ('Last login: ' + parts.join(' • ')) : ''
+        }
+    } catch {}
 }
 
 function sanitize(html) {
@@ -128,6 +152,17 @@ async function refreshNotes() {
         const left = document.createElement('div');
         left.className = 'title';
         left.textContent = title;
+        if (n.id === currentNoteId && n.updatedAt) {
+            const small = document.createElement('span');
+            small.className = 'updated';
+            try {
+                const d = new Date(n.updatedAt);
+                small.textContent = 'Last modified: ' + d.toLocaleString();
+            } catch {
+                small.textContent = 'Last modified: ' + (n.updatedAt || '')
+            }
+            left.appendChild(small)
+        }
         const right = document.createElement('div');
         right.className = 'meta';
         // right.textContent = n.protected ? '🔒' : '';
@@ -136,10 +171,7 @@ async function refreshNotes() {
         const shareBtn = document.createElement('button');
         shareBtn.title = 'Share';
         shareBtn.textContent = '📤';
-        shareBtn.onclick = (e) => {
-            e.stopPropagation();
-            shareNote(n.id, title)
-        };
+        shareBtn.onclick = (e) => { e.stopPropagation(); openShareDialog(n.id, title) };
         const delBtn = document.createElement('button');
         delBtn.title = 'Delete';
         delBtn.textContent = '🗑️';
@@ -162,6 +194,11 @@ async function refreshNotes() {
             };
             actions.appendChild(lockBtn)
         }
+        const sharedIcon = document.createElement('button');
+        sharedIcon.title = n.shared ? (n.sharePermission==='rw'?'Shared: edit':'Shared: read-only') : 'Not shared';
+        sharedIcon.textContent = n.shared ? '🔗' : '';
+        if (n.shared) { sharedIcon.onclick = (e)=>{ e.stopPropagation(); showStatus(true, sharedIcon.title, { small:true, persist:true }) } }
+        actions.appendChild(sharedIcon);
         actions.appendChild(shareBtn);
         actions.appendChild(delBtn);
         row.appendChild(left);
@@ -174,6 +211,7 @@ async function refreshNotes() {
 async function openNote(id) {
     currentNoteId = id;
     unlockedNoteId = null;
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
     const n = await api('/notes/' + id, 'GET');
     const title = n.titlePlain || '';
     let html = '';
@@ -184,6 +222,21 @@ async function openNote(id) {
     }
     el('title').value = title;
     el('content').innerHTML = sanitize(html);
+    const saveBtn = document.getElementById('saveBtn');
+    if (saveBtn) saveBtn.disabled = (n.shared && n.sharePermission === 'ro');
+    currentNoteLastUpdate = n.updatedAt || null;
+    if (n.shared) {
+        pollTimer = setInterval(async () => {
+            const m = await api('/notes/' + id, 'GET');
+            if (m && m.updatedAt && m.updatedAt !== currentNoteLastUpdate) {
+                currentNoteLastUpdate = m.updatedAt;
+                const newHtml = m.contentEnc && m.contentEnc.alg === 'PLAIN' ? m.contentEnc.data : '';
+                el('content').innerHTML = sanitize(newHtml);
+                el('title').value = m.titlePlain || '';
+                showStatus(true, 'Updated from share', { small: true })
+            }
+        }, 3000)
+    }
     await refreshNotes()
 }
 async function createNoteWith(title, html) {
@@ -214,26 +267,51 @@ async function createNoteWith(title, html) {
 el('saveBtn').onclick = async () => {
     openSaveDialog()
 }
-async function shareNote(id, title) {
-    const email = prompt('Recipient email:');
-    if (!email) return;
-    const n = await api('/notes/' + id, 'GET');
-    const sk = new Uint8Array(32);
-    crypto.getRandomValues(sk);
-    const payload = JSON.stringify(n.contentEnc || {
-        alg: 'PLAIN',
-        data: ''
-    });
-    const nkEnvelopeForLink = await aesEncryptRaw(new TextEncoder().encode(payload), sk);
-    const resp = await api('/shares', 'POST', {
-        noteId: id,
-        recipientEmail: email,
-        nkEnvelopeForLink
-    });
-    if (resp && resp.token) {
-        const keyB64 = b64(sk);
-        const link = window.location.origin + '/dashboard?share=' + resp.token + '#key=' + keyB64;
-        alert('Share link created for ' + email + '\n' + link)
+function openShareDialog(id, title) {
+    const modal = document.getElementById('modal');
+    const titleEl = document.getElementById('modalTitle');
+    const body = document.getElementById('modalBody');
+    const okBtn = document.getElementById('modalOk');
+    const cancelBtn = document.getElementById('modalCancel');
+    titleEl.textContent = 'Share Note';
+    body.innerHTML = '';
+    const emailInput = document.createElement('input');
+    emailInput.type = 'email';
+    emailInput.placeholder = 'Recipient email';
+    emailInput.style.width = '100%';
+    emailInput.style.margin = '8px 0';
+    body.appendChild(emailInput);
+    const perm = document.createElement('select');
+    perm.innerHTML = '<option value="ro">Read only</option><option value="rw">Edit & Read</option>';
+    perm.style.width = '100%';
+    perm.style.margin = '8px 0';
+    body.appendChild(perm);
+    modal.style.display = 'flex';
+    function close() { modal.style.display = 'none'; okBtn.onclick = null; cancelBtn.onclick = null }
+    cancelBtn.onclick = () => { close() }
+    okBtn.onclick = async () => {
+        const email = emailInput.value.trim();
+        if (!email) { showStatus(false, 'Invalid email'); return }
+        try {
+            const n = await api('/notes/' + id, 'GET');
+            if (n.protected && unlockedNoteId !== id) { showStatus(false, 'Unlock note first'); close(); return }
+            const sk = new Uint8Array(32);
+            crypto.getRandomValues(sk);
+            const payloadHtml = document.getElementById('content').innerHTML || '';
+            const nkEnvelopeForLink = await aesEncryptRaw(new TextEncoder().encode(payloadHtml), sk);
+            const resp = await api('/shares', 'POST', { noteId: id, recipientEmail: email, nkEnvelopeForLink, permission: perm.value });
+            if (resp && resp.token) {
+                const keyB64 = b64(sk);
+                const link = window.location.origin + '/dashboard?share=' + resp.token + '#key=' + keyB64;
+                showStatus(true, 'Shared: ' + link, { persist: true, small: true, copyText: link });
+            } else {
+                showStatus(false, 'Share failed');
+            }
+            close()
+        } catch (e) {
+            showStatus(false, 'Share failed');
+            close()
+        }
     }
 }
 async function deleteNote(id) {
@@ -248,13 +326,20 @@ async function deleteNote(id) {
         await refreshNotes()
     }
 }
-function showStatus(ok, msg) {
+function showStatus(ok, msg, opts) {
     const box = document.getElementById('statusBox');
     const card = document.getElementById('statusCard');
+    if (opts && opts.small) { card.classList.add('small') } else { card.classList.remove('small') }
     card.textContent = (ok ? '✅ ' : '❌ ') + msg;
     box.style.display = 'flex';
-    setTimeout(() => { box.style.display = 'none' }, 1200)
+    if (opts && opts.copyText) { try { navigator.clipboard.writeText(opts.copyText) } catch {} }
+    box.onclick = () => { box.style.display = 'none'; box.onclick = null; card.classList.remove('small') }
+    if (!(opts && opts.persist)) { setTimeout(() => { if (box.style.display === 'flex') { box.style.display = 'none'; card.classList.remove('small') } }, 1200) }
 }
+
+function getParam(name){const m=location.search.match(new RegExp('[?&]'+name+'=([^&]+)'));return m?decodeURIComponent(m[1]):null}
+function getKeyFromHash(){const m=location.hash.match(/key=([^&]+)/);return m?m[1]:null}
+async function openSharedIfPresent(){const token=getParam('share');const keyB64=getKeyFromHash();if(!token||!keyB64)return;try{const payload=await api('/shares/'+token,'GET');if(payload&&payload.nkEnvelopeForLink){const sk=ub64(keyB64);const html=new TextDecoder().decode(await aesDecryptRaw(payload.nkEnvelopeForLink,sk));const title=payload.titlePlain||'Shared';const created=await api('/notes/plain','POST',{title,contentHtml:html});if(created&&created.id){await api('/shares/'+token+'/accept','POST',{noteId:created.id});await refreshNotes();await openNote(created.id);showStatus(true,'Added shared note',{small:true})}}}catch(e){showStatus(false,'Open share failed',{small:true})}}
 
 function openCreateDialog() {
     const modal = document.getElementById('modal');
@@ -351,6 +436,7 @@ function openSaveDialog() {
                 const resp = await api('/notes/' + currentNoteId + '/plain', 'PUT', { title, contentHtml: html });
                 if (!resp || resp.ok !== true) throw new Error('save_failed')
             }
+            try { await api('/shares/sync','POST',{ noteId: currentNoteId, title, contentHtml: html }) } catch {}
             showStatus(true, 'Saved');
             close();
             await refreshNotes();
@@ -425,7 +511,9 @@ window.addEventListener('load', () => {
         return
     }
     render();
-    refreshNotes()
+    refreshNotes();
+    refreshLastLogin();
+    openSharedIfPresent()
 })
 el('logoutBtn').onclick = () => {
     try {

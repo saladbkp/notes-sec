@@ -15,22 +15,18 @@ function loadSession() {
     }
 }
 async function api(path, method, body) {
-    const h = {
-        'Content-Type': 'application/json'
-    };
+    const h = { 'Content-Type': 'application/json' };
     const s = loadSession();
-    if (s) {
-        h.Authorization = 'Bearer ' + s.access;
-        if (method !== 'GET') {
-            h['x-csrf-token'] = s.csrfToken
-        }
+    if (s) { h.Authorization = 'Bearer ' + s.access; if (method !== 'GET') { h['x-csrf-token'] = s.csrfToken } }
+    const r = await fetch(path, { method, headers: h, body: body ? JSON.stringify(body) : undefined });
+    const text = await r.text();
+    try {
+        const obj = text ? JSON.parse(text) : {};
+        if (obj && obj.error === 'unauthorized') { try { localStorage.removeItem('notesSession') } catch {}; location.href = '/login'; return obj }
+        return obj
+    } catch {
+        return { ok: false, error: 'parse_error', status: r.status, body: text }
     }
-    const r = await fetch(path, {
-        method,
-        headers: h,
-        body: body ? JSON.stringify(body) : undefined
-    });
-    return r.json()
 }
 window.addEventListener('load', () => {
     const s = loadSession();

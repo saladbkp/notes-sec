@@ -57,6 +57,8 @@ CREATE TABLE IF NOT EXISTS notes(
   size_padded INTEGER NOT NULL,
   protected INTEGER NOT NULL DEFAULT 0,
   note_salt TEXT,
+  shared INTEGER NOT NULL DEFAULT 0,
+  share_permission TEXT,
   FOREIGN KEY(user_id) REFERENCES users(id)
 );
 CREATE TABLE IF NOT EXISTS note_blobs(
@@ -74,6 +76,9 @@ CREATE TABLE IF NOT EXISTS shares(
   nk_envelope_for_recipient TEXT,
   nk_envelope_for_link TEXT,
   share_token TEXT UNIQUE,
+  permission TEXT DEFAULT 'ro',
+  accepted INTEGER NOT NULL DEFAULT 0,
+  accepted_note_id INTEGER,
   created_at TEXT NOT NULL,
   FOREIGN KEY(note_id) REFERENCES notes(id),
   FOREIGN KEY(owner_id) REFERENCES users(id),
@@ -94,6 +99,7 @@ CREATE TABLE IF NOT EXISTS audit(
   resource_id TEXT,
   ts TEXT NOT NULL,
   ip TEXT,
+  ua TEXT,
   device_id INTEGER
 );
 CREATE TABLE IF NOT EXISTS csrf_tokens(
@@ -105,10 +111,16 @@ CREATE TABLE IF NOT EXISTS csrf_tokens(
 try { db.exec('ALTER TABLE notes ADD COLUMN title_plain TEXT') } catch(e) {}
 try { db.exec('ALTER TABLE notes ADD COLUMN protected INTEGER NOT NULL DEFAULT 0') } catch(e) {}
 try { db.exec('ALTER TABLE notes ADD COLUMN note_salt TEXT') } catch(e) {}
+try { db.exec('ALTER TABLE notes ADD COLUMN shared INTEGER NOT NULL DEFAULT 0') } catch(e) {}
+try { db.exec('ALTER TABLE notes ADD COLUMN share_permission TEXT') } catch(e) {}
 try { db.exec('ALTER TABLE shares ADD COLUMN nk_envelope_for_link TEXT') } catch(e) {}
 try { db.exec('ALTER TABLE shares ADD COLUMN share_token TEXT UNIQUE') } catch(e) {}
+try { db.exec("ALTER TABLE shares ADD COLUMN permission TEXT DEFAULT 'ro'") } catch(e) {}
+try { db.exec('ALTER TABLE shares ADD COLUMN accepted INTEGER NOT NULL DEFAULT 0') } catch(e) {}
+try { db.exec('ALTER TABLE shares ADD COLUMN accepted_note_id INTEGER') } catch(e) {}
 
 try { db.exec('ALTER TABLE vault_keys ADD COLUMN umk_salt TEXT') } catch (e) {}
+try { db.exec('ALTER TABLE audit ADD COLUMN ua TEXT') } catch (e) {}
 
 const jwtSecret = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex')
 
@@ -141,8 +153,8 @@ function auth(req, res, next) {
 }
 
 function audit(userId, action, resourceId, req) {
-  db.prepare('INSERT INTO audit(user_id, action, resource_id, ts, ip, device_id) VALUES(?,?,?,?,?,?)')
-    .run(userId || null, action, resourceId || null, now(), req.ip || null, req.user?.deviceId || null)
+  db.prepare('INSERT INTO audit(user_id, action, resource_id, ts, ip, ua, device_id) VALUES(?,?,?,?,?,?,?)')
+    .run(userId || null, action, resourceId || null, now(), req.ip || null, req.get('user-agent') || null, req.user?.deviceId || null)
 }
 
 app.post('/auth/register', (req, res) => {
@@ -187,6 +199,13 @@ app.get('/csrf-token', auth, (req, res) => {
   const row = db.prepare('SELECT token FROM csrf_tokens WHERE device_id=?').get(req.user.deviceId)
   if (!row) return res.status(404).json({ error: 'not_found' })
   res.json({ csrfToken: row.token })
+})
+
+app.get('/auth/last-login', auth, (req, res) => {
+  const row = db.prepare('SELECT ts, ip, ua FROM audit WHERE user_id=? AND action=? ORDER BY ts DESC LIMIT 1')
+    .get(req.user.id, 'login')
+  if (!row) return res.json({ ts: null, ip: null, ua: null })
+  res.json({ ts: row.ts, ip: row.ip || null, ua: row.ua || null })
 })
 
 app.post('/mfa/setup', auth, (req, res) => {
@@ -313,8 +332,8 @@ app.post('/search/reindex', auth, (req, res) => {
 })
 
 app.get('/notes', auth, (req, res) => {
-  const rows = db.prepare('SELECT id, updated_at, title_encrypted, title_plain, size_padded, protected FROM notes WHERE user_id=? ORDER BY updated_at DESC').all(req.user.id)
-  const items = rows.map(r => ({ id: r.id, updatedAt: r.updated_at, titleEnc: r.title_encrypted ? JSON.parse(r.title_encrypted) : null, titlePlain: r.title_plain || null, sizePadded: r.size_padded, protected: r.protected }))
+  const rows = db.prepare('SELECT id, updated_at, title_encrypted, title_plain, size_padded, protected, shared, share_permission FROM notes WHERE user_id=? ORDER BY updated_at DESC').all(req.user.id)
+  const items = rows.map(r => ({ id: r.id, updatedAt: r.updated_at, titleEnc: r.title_encrypted ? JSON.parse(r.title_encrypted) : null, titlePlain: r.title_plain || null, sizePadded: r.size_padded, protected: r.protected, shared: r.shared || 0, sharePermission: r.share_permission || null }))
   res.json({ items })
 })
 
@@ -323,7 +342,7 @@ app.get('/notes/:id', auth, (req, res) => {
   if (!note) return res.status(404).json({ error: 'not_found' })
   const blob = db.prepare('SELECT blob_encrypted FROM note_blobs WHERE note_id=? ORDER BY chunk_index ASC').get(note.id)
   const content = JSON.parse(blob.blob_encrypted.toString())
-  res.json({ id: note.id, protected: note.protected, noteSalt: note.note_salt || null, titlePlain: note.title_plain || null, noteKeyEnvelope: note.note_key_envelope ? JSON.parse(note.note_key_envelope) : null, titleEnc: note.title_encrypted ? JSON.parse(note.title_encrypted) : null, contentEnc: content })
+  res.json({ id: note.id, protected: note.protected, noteSalt: note.note_salt || null, titlePlain: note.title_plain || null, noteKeyEnvelope: note.note_key_envelope ? JSON.parse(note.note_key_envelope) : null, titleEnc: note.title_encrypted ? JSON.parse(note.title_encrypted) : null, contentEnc: content, shared: note.shared || 0, sharePermission: note.share_permission || null, updatedAt: note.updated_at })
 })
 
 app.post('/search/index', auth, (req, res) => {
@@ -346,15 +365,15 @@ app.post('/search', auth, (req, res) => {
 })
 
 app.post('/shares', auth, (req, res) => {
-  const { noteId, recipientEmail, nkEnvelopeForLink } = req.body || {}
+  const { noteId, recipientEmail, nkEnvelopeForLink, permission } = req.body || {}
   if (!noteId || !recipientEmail || !nkEnvelopeForLink) return res.status(400).json({ error: 'invalid' })
   const note = db.prepare('SELECT id FROM notes WHERE id=? AND user_id=?').get(noteId, req.user.id)
   if (!note) return res.status(404).json({ error: 'not_found' })
   const rec = db.prepare('SELECT id FROM users WHERE email=?').get(recipientEmail)
   if (!rec) return res.status(404).json({ error: 'recipient_not_found' })
   const token = crypto.randomBytes(24).toString('hex')
-  const info = db.prepare('INSERT INTO shares(note_id, owner_id, recipient_id, nk_envelope_for_link, share_token, created_at) VALUES(?,?,?,?,?,?)')
-    .run(noteId, req.user.id, rec.id, JSON.stringify(nkEnvelopeForLink), token, now())
+  const info = db.prepare('INSERT INTO shares(note_id, owner_id, recipient_id, nk_envelope_for_link, share_token, permission, created_at) VALUES(?,?,?,?,?,?,?)')
+    .run(noteId, req.user.id, rec.id, JSON.stringify(nkEnvelopeForLink), token, (permission === 'rw' ? 'rw' : 'ro'), now())
   audit(req.user.id, 'share_note', String(noteId), req)
   res.json({ id: info.lastInsertRowid, token })
 })
@@ -368,9 +387,54 @@ app.get('/shares/:token', auth, (req, res) => {
   res.json({
     noteId: note.id,
     nkEnvelopeForLink: JSON.parse(share.nk_envelope_for_link),
-    titleEnc: JSON.parse(note.title_encrypted),
+    titlePlain: note.title_plain || null,
+    permission: share.permission || 'ro',
     contentEnc: JSON.parse(blob.blob_encrypted.toString())
   })
+})
+
+app.post('/shares/:token/accept', auth, (req, res) => {
+  const { noteId } = req.body || {}
+  const share = db.prepare('SELECT * FROM shares WHERE share_token=?').get(req.params.token)
+  if (!share) return res.status(404).json({ error: 'not_found' })
+  if (share.recipient_id !== req.user.id) return res.status(403).json({ error: 'forbidden' })
+  if (!noteId) return res.status(400).json({ error: 'invalid' })
+  db.prepare('UPDATE shares SET accepted=1, accepted_note_id=? WHERE id=?').run(noteId, share.id)
+  db.prepare('UPDATE notes SET shared=1, share_permission=? WHERE id=? AND user_id=?').run(share.permission || 'ro', noteId, req.user.id)
+  audit(req.user.id, 'share_accept', String(noteId), req)
+  res.json({ ok: true })
+})
+
+app.post('/shares/sync', auth, (req, res) => {
+  const { noteId, title, contentHtml } = req.body || {}
+  if (!noteId || typeof title !== 'string' || typeof contentHtml !== 'string') return res.status(400).json({ error: 'invalid' })
+  const links = db.prepare('SELECT * FROM shares WHERE (note_id=? OR accepted_note_id=?) AND accepted=1').all(noteId, noteId)
+  let updated = 0
+  const tx = db.transaction(() => {
+    for (const s of links) {
+      if (s.note_id === noteId) {
+        // owner -> recipient
+        if (!s.accepted_note_id) continue
+        db.prepare('UPDATE notes SET title_plain=?, updated_at=?, size_padded=?, shared=1, share_permission=? WHERE id=? AND user_id=?')
+          .run(title, now(), Buffer.byteLength(contentHtml), s.permission || 'ro', s.accepted_note_id, s.recipient_id)
+        const blob = { alg: 'PLAIN', data: contentHtml }
+        db.prepare('UPDATE note_blobs SET blob_encrypted=? WHERE note_id=? AND chunk_index=0')
+          .run(Buffer.from(JSON.stringify(blob)), s.accepted_note_id)
+        updated++
+      } else if (s.accepted_note_id === noteId && (s.permission || 'ro') === 'rw') {
+        // recipient -> owner (only rw)
+        db.prepare('UPDATE notes SET title_plain=?, updated_at=?, size_padded=?, shared=1, share_permission=? WHERE id=? AND user_id=?')
+          .run(title, now(), Buffer.byteLength(contentHtml), s.permission || 'ro', s.note_id, s.owner_id)
+        const blob = { alg: 'PLAIN', data: contentHtml }
+        db.prepare('UPDATE note_blobs SET blob_encrypted=? WHERE note_id=? AND chunk_index=0')
+          .run(Buffer.from(JSON.stringify(blob)), s.note_id)
+        updated++
+      }
+    }
+  })
+  tx()
+  audit(req.user.id, 'share_sync', String(noteId), req)
+  res.json({ ok: true, updated })
 })
 
 app.delete('/notes/:id', auth, (req, res) => {
