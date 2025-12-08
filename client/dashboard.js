@@ -9,6 +9,7 @@ const state = {
 const el = id => document.getElementById(id)
 let currentNoteId = null
 let searchTerm = ''
+let unlockedNoteId = null
 
 function b64(x) {
     return btoa(String.fromCharCode(...new Uint8Array(x)))
@@ -129,7 +130,7 @@ async function refreshNotes() {
         left.textContent = title;
         const right = document.createElement('div');
         right.className = 'meta';
-        right.textContent = n.protected ? '🔒' : '';
+        // right.textContent = n.protected ? '🔒' : '';
         const actions = document.createElement('div');
         actions.className = 'actions-mini';
         const shareBtn = document.createElement('button');
@@ -146,6 +147,21 @@ async function refreshNotes() {
             e.stopPropagation();
             deleteNote(n.id)
         };
+        if (n.protected) {
+            const lockBtn = document.createElement('button');
+            lockBtn.title = (unlockedNoteId === n.id) ? 'Relock' : 'Unlock';
+            lockBtn.textContent = (unlockedNoteId === n.id) ? '🔓' : '🔒';
+            lockBtn.onclick = (e) => {
+                e.stopPropagation();
+                if (unlockedNoteId === n.id) {
+                    unlockedNoteId = null;
+                    openNote(n.id)
+                } else {
+                    openUnlockDialog(n.id)
+                }
+            };
+            actions.appendChild(lockBtn)
+        }
         actions.appendChild(shareBtn);
         actions.appendChild(delBtn);
         row.appendChild(left);
@@ -157,6 +173,7 @@ async function refreshNotes() {
 }
 async function openNote(id) {
     currentNoteId = id;
+    unlockedNoteId = null;
     const n = await api('/notes/' + id, 'GET');
     const title = n.titlePlain || '';
     let html = '';
@@ -340,6 +357,44 @@ function openSaveDialog() {
             await openNote(currentNoteId)
         } catch (e) {
             showStatus(false, 'Save failed ' + e.message);
+            close()
+        }
+    }
+}
+
+function openUnlockDialog(id) {
+    const modal = document.getElementById('modal');
+    const titleEl = document.getElementById('modalTitle');
+    const body = document.getElementById('modalBody');
+    const okBtn = document.getElementById('modalOk');
+    const cancelBtn = document.getElementById('modalCancel');
+    titleEl.textContent = 'Unlock Note';
+    body.innerHTML = '';
+    const p = document.createElement('input');
+    p.type = 'password';
+    p.placeholder = 'Enter note password';
+    p.style.width = '100%';
+    p.style.margin = '8px 0';
+    body.appendChild(p);
+    modal.style.display = 'flex';
+    function close() { modal.style.display = 'none'; okBtn.onclick = null; cancelBtn.onclick = null }
+    cancelBtn.onclick = () => { close() }
+    okBtn.onclick = async () => {
+        try {
+            const n = await api('/notes/' + id, 'GET');
+            const salt = atob(n.noteSalt);
+            const saltBytes = new Uint8Array(salt.length);
+            for (let i = 0; i < salt.length; i++) saltBytes[i] = salt.charCodeAt(i);
+            const key = await kdf(p.value, saltBytes);
+            const html = new TextDecoder().decode(await aesDecryptRaw(n.contentEnc, key));
+            sessionStorage.setItem('notePass:' + id, p.value);
+            unlockedNoteId = id;
+            el('content').innerHTML = sanitize(html);
+            showStatus(true, 'Unlocked');
+            close();
+            await refreshNotes()
+        } catch (e) {
+            showStatus(false, 'Unlock failed');
             close()
         }
     }

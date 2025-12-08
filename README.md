@@ -82,7 +82,6 @@ layout 参考 我给的照片 x
 no refresh for created note x
 refresh http://localhost:3333/ui/ -> re login ?
 
-很丑 现在的 design 你重新 看一轮 这个是 login pge 很大问题 参考 照片 1 他为什么 login page 有 create note 
 1
 login page 我要 box 放中间 
 然后 不要用 http://localhost:3333/ui/
@@ -118,8 +117,8 @@ content 可以改
 
 share 和 delete button 是一个 emoji 在 左边 选 note 的 bar
 
-
-一步一步 完成 我的 要求 不可以 漏掉 任何一个 requuirement 
-
-
+下一步是 改
+lock unlock status /
+还没check search regex  / auto update 是最好
+为什么 all note 会不见  {"error":"unauthorized"}
 
