@@ -141,3 +141,10 @@ b 改了 a msg 也会 sync
 security 上面 加 
 last modified time 
 last login 在 signed in 下面
+
+
+remind current username and password 
+abc123@gmail.com abc123
+test@gmail.com test
+
+note password -> a / test
