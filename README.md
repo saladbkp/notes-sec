@@ -65,6 +65,9 @@ Pages:
 - First vault unlock creates your vault key if none exists.
 - The list view fetches titles per note to decrypt client-side.
 
+<img width="1879" height="795" alt="image" src="https://github.com/user-attachments/assets/12349d18-7ad9-4fd2-8445-6dc9d11f3756" />
+
+
 ## PROGRESS
 
 8/12
