@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Login • Notes Zero-Trust</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="center">
+    <section class="card" style="max-width:480px;width:100%">
+      <h2>Sign In</h2>
+      <div class="field">
+        <label for="email">Email</label>
+        <input id="email" type="email" placeholder="you@example.com" />
+      </div>
+      <div class="field">
+        <label for="authPass">Auth Password</label>
+        <input id="authPass" type="password" placeholder="••••••••" />
+      </div>
+      <div class="actions">
+        <button id="register" class="btn primary">Register</button>
+        <button id="login" class="btn">Login</button>
+      </div>
+      <div id="authMsg" class="msg"></div>
+    </section>
+  </div>
+  <script src="login.js"></script>
+</body>
+</html>

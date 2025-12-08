@@ -1,0 +1,101 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Notes Zero-Trust</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+  </head>
+<body>
+  <header class="app-header">
+    <div class="brand">Notes Zero-Trust</div>
+    <div class="status">
+      <span id="statusEmail"></span>
+      <button id="logoutBtn" class="btn secondary">Logout</button>
+    </div>
+  </header>
+  <main class="container" id="app">
+    <aside id="sidebar" class="sidebar">
+      <div class="nav">
+        <button id="addPage" class="btn primary">Add Page</button>
+      </div>
+      <div id="notesSidebar" class="list"></div>
+    </aside>
+    <section id="contentArea" class="content">
+      <div id="contentHeader" class="content-header">
+        <input id="term" class="search-input" placeholder="Search notes" />
+        <button id="searchBtn" class="btn">Search</button>
+        <button id="newBtn" class="btn primary">New Note</button>
+      </div>
+    <section id="auth" class="card">
+      <h2>Sign In</h2>
+      <div class="field">
+        <label for="email">Email</label>
+        <input id="email" type="email" placeholder="you@example.com" />
+      </div>
+      <div class="field">
+        <label for="authPass">Auth Password</label>
+        <input id="authPass" type="password" placeholder="••••••••" />
+      </div>
+      <div class="actions">
+        <button id="register" class="btn primary">Register</button>
+        <button id="login" class="btn">Login</button>
+      </div>
+      <div id="authMsg" class="msg"></div>
+    </section>
+
+    <section id="unlock" class="card">
+      <h2>Unlock Vault</h2>
+      <p class="sub">Your content password protects your vault keys.</p>
+      <div class="field">
+        <label for="contentPass">Content Password</label>
+        <input id="contentPass" type="password" placeholder="Set or enter content password" />
+      </div>
+      <div class="actions">
+        <button id="unlockBtn" class="btn primary">Unlock</button>
+      </div>
+      <div id="unlockMsg" class="msg"></div>
+    </section>
+
+    <section id="create" class="card">
+      <h2>Create Note</h2>
+      <div class="field">
+        <label for="title">Title</label>
+        <input id="title" placeholder="Note title" />
+      </div>
+      <div class="field">
+        <label>Content</label>
+        <div id="content" class="editor" contenteditable="true"></div>
+      </div>
+      <div class="actions">
+        <button id="createBtn" class="btn primary">Create</button>
+      </div>
+    </section>
+
+    <section id="search" class="card">
+      <div id="results" class="list"></div>
+    </section>
+
+    <section id="detail" class="card">
+      <div class="field">
+        <label for="title">Title</label>
+        <input id="title" placeholder="Untitled" />
+      </div>
+      <div class="field">
+        <label>Content</label>
+        <div id="content" class="editor" contenteditable="true"></div>
+      </div>
+      <div class="actions">
+        <button id="saveBtn" class="btn primary">Save</button>
+        <button id="shareCurrent" class="btn">Share</button>
+        <button id="deleteCurrent" class="btn">Delete</button>
+      </div>
+    </section>
+    </section>
+  </main>
+  <script src="main.js"></script>
+  </body>
+</html>

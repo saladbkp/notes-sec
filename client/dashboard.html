@@ -1,0 +1,59 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dashboard • Notes Zero-Trust</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">Notes Zero-Trust</div>
+    <div class="header-search">
+      <input id="headerSearch" placeholder="Search titles (regex)" />
+      <button id="headerSearchBtn" class="btn">Search</button>
+    </div>
+    <div class="status">
+      <span id="statusEmail"></span>
+      <button id="logoutBtn" class="btn secondary">Logout</button>
+    </div>
+  </header>
+  <main class="container" id="app">
+    <aside id="sidebar" class="sidebar">
+      <div class="nav">
+        <button id="addPage" class="btn primary">Add Page</button>
+      </div>
+      <div id="notesSidebar" class="list"></div>
+    </aside>
+    <section id="contentArea" class="content">
+      <section id="detail" class="card">
+        <div class="field">
+          <label for="title">Title</label>
+          <input id="title" placeholder="Untitled" />
+        </div>
+        <div class="field">
+          <label>Content</label>
+          <div id="content" class="editor" contenteditable="true"></div>
+        </div>
+        <div class="actions">
+          <button id="saveBtn" class="btn primary">Save</button>
+        </div>
+      </section>
+    </section>
+  </main>
+  <div id="modal" class="modal" style="display:none">
+    <div class="modal-card">
+      <h3 id="modalTitle">Dialog</h3>
+      <div id="modalBody"></div>
+      <div class="actions">
+        <button id="modalCancel" class="btn">Cancel</button>
+        <button id="modalOk" class="btn primary">OK</button>
+      </div>
+    </div>
+  </div>
+  <div id="statusBox" class="modal" style="display:none">
+    <div class="status-card" id="statusCard"></div>
+  </div>
+  <script src="dashboard.js"></script>
+</body>
+</html>
