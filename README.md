@@ -67,6 +67,11 @@ Pages:
 
 <img width="1879" height="795" alt="image" src="https://github.com/user-attachments/assets/12349d18-7ad9-4fd2-8445-6dc9d11f3756" />
 
+## Objectives 
+1.To investigate the security vulnerabilities in current educational note-taking software and study the principles of Multi-Layer Encryption and Zero Trust Architecture. (See [SECURITY_REPORT.md](./SECURITY_REPORT.md))
+2.To design a secure system architecture that integrates client-side text preprocessing (Pinyin conversion), random mapping, and AES-GCM encryption within a Zero Trust framework.
+3.To develop a functional prototype of the note-taking application that implements the proposed encryption workflow and intrusion detection mechanisms such as camera capture and IP blocking.
+4.To evaluate the system's security effectiveness through functionality testing and vulnerability assessments against common attack vectors like brute-force attacks and SQL injection.
 
 ## PROGRESS
 
@@ -142,6 +147,14 @@ security 上面 加
 last modified time 
 last login 在 signed in 下面
 
+18/12
+pinyin + rotation /
+detection.log for intrusion brute force / sql 
+testing payload -> 
+1. brute force attack on login
+2. sql injection attack on login
+3. brute force attack on note creation
+4. sql injection attack on note creation
 
 remind current username and password 
 abc123@gmail.com abc123

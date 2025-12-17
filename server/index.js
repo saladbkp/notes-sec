@@ -8,15 +8,115 @@ import Database from 'better-sqlite3'
 import path from 'path'
 import crypto from 'crypto'
 import { authenticator } from 'otplib'
+import fs from 'fs'
 
 const app = express()
 app.use(express.json({ limit: '10mb' }))
+
+// Debug endpoint for client logs
+app.post('/debug/log', (req, res) => {
+    const { msg } = req.body || {};
+    if (msg) console.log('\x1b[36m[CLIENT-LOG]\x1b[0m', msg);
+    res.json({ ok: true });
+});
+
 app.use(cors({ origin: true, credentials: true }))
 app.use(helmet({ contentSecurityPolicy: false }))
 app.use(rateLimit({ windowMs: 60 * 1000, max: 120 }))
 
 const dbPath = path.join(process.cwd(), 'server', 'data', 'notes.db')
 const db = new Database(dbPath)
+
+// Intrusion Detection: Log file path
+const detectionLogPath = path.join(process.cwd(), 'logs', 'detection.log');
+
+// Helper to log intrusion events
+function logIntrusion(event, details) {
+    const timestamp = new Date().toISOString();
+    const logEntry = `[${timestamp}] [${event}] ${JSON.stringify(details)}\n`;
+    try {
+        fs.appendFileSync(detectionLogPath, logEntry);
+    } catch (e) {
+        console.error('Failed to write detection log:', e);
+    }
+}
+
+// IP Blocking Map (Simple in-memory implementation)
+const ipFailures = new Map();
+const BLOCK_THRESHOLD = 3;
+const BLOCK_DURATION = 15 * 60 * 1000; // 15 minutes
+const ATTEMPT_WINDOW = 5000; // 5 seconds
+
+function checkIpBlock(req, res, next) {
+    const ip = req.ip || req.connection.remoteAddress;
+    const record = ipFailures.get(ip);
+    if (record && record.blockedUntil > Date.now()) {
+        logIntrusion('IP_BLOCKED_ACCESS_ATTEMPT', { ip, blockedUntil: new Date(record.blockedUntil).toISOString() });
+        return res.status(403).json({ error: 'ip_blocked', message: 'Too many failed attempts. Try again later.' });
+    }
+    next();
+}
+
+function recordFailure(ip) {
+    const now = Date.now();
+    let record = ipFailures.get(ip);
+    if (!record) {
+        record = { attempts: [], blockedUntil: 0 };
+        ipFailures.set(ip, record);
+    }
+
+    // Add new failure timestamp
+    record.attempts.push(now);
+
+    // Remove attempts outside the window
+    record.attempts = record.attempts.filter(t => now - t <= ATTEMPT_WINDOW);
+
+    // Check threshold
+    if (record.attempts.length >= BLOCK_THRESHOLD) {
+        record.blockedUntil = now + BLOCK_DURATION;
+        record.attempts = []; // Reset attempts after blocking
+        logIntrusion('IP_BLOCKED', { ip, attempts: BLOCK_THRESHOLD, window: '5s', blockedUntil: new Date(record.blockedUntil).toISOString() });
+    }
+}
+
+app.post('/auth/logout', (req, res) => {
+    // Just log the event, client clears token
+    logIntrusion('LOGOUT', { ip: req.ip || req.connection.remoteAddress });
+    res.json({ ok: true });
+});
+
+// Endpoint to report suspicious behavior (e.g., failed unlock) and upload evidence (screenshot/camera)
+app.post('/api/report-intrusion', (req, res) => {
+    const { type, imageBase64, noteId, details } = req.body || {};
+    const ip = req.ip || req.connection.remoteAddress;
+    
+    // Log the event (including normal events if sent here)
+    logIntrusion(type === 'normal_event' ? 'CLIENT_EVENT' : 'CLIENT_REPORTED_INTRUSION', { type, ip, noteId, details });
+    
+    // Save evidence image if provided
+    if (imageBase64) {
+        const matches = imageBase64.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+        if (matches && matches.length === 3) {
+            const ext = matches[1].split('/')[1] || 'png';
+            const buffer = Buffer.from(matches[2], 'base64');
+            const filename = `evidence_${Date.now()}_${type}_${Math.random().toString(36).substring(7)}.${ext}`;
+            const filepath = path.join(process.cwd(), 'logs', filename);
+            try {
+                fs.writeFileSync(filepath, buffer);
+                logIntrusion('EVIDENCE_SAVED', { filename });
+            } catch (e) {
+                console.error('Failed to save evidence:', e);
+            }
+        }
+    }
+    
+    // If it's a login failure or unlock failure, record for IP blocking
+    if (type === 'login_fail' || type === 'unlock_fail') {
+        recordFailure(ip);
+    }
+    
+    res.json({ ok: true });
+});
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS users(
@@ -179,12 +279,27 @@ app.post('/auth/register', (req, res) => {
   }
 })
 
-app.post('/auth/login', (req, res) => {
+app.post('/auth/login', checkIpBlock, (req, res) => {
   const { email, authPassword, deviceName } = req.body || {}
+  
+  // Log every login attempt (for SQLi/BruteForce auditing)
+  logIntrusion('LOGIN_ATTEMPT', { ip: req.ip || req.connection.remoteAddress, email, deviceName });
+
   const user = db.prepare('SELECT * FROM users WHERE email=?').get(email)
-  if (!user) return res.status(401).json({ error: 'invalid' })
+  if (!user) {
+    recordFailure(req.ip || req.connection.remoteAddress)
+    logIntrusion('LOGIN_FAILED', { ip: req.ip || req.connection.remoteAddress, reason: 'user_not_found', email });
+    return res.status(401).json({ error: 'invalid' })
+  }
   const ok = bcrypt.compareSync(authPassword + user.auth_salt, user.auth_hash)
-  if (!ok) return res.status(401).json({ error: 'invalid' })
+  if (!ok) {
+    recordFailure(req.ip || req.connection.remoteAddress)
+    logIntrusion('LOGIN_FAILED', { ip: req.ip || req.connection.remoteAddress, reason: 'password_mismatch', email });
+    return res.status(401).json({ error: 'invalid' })
+  }
+  
+  logIntrusion('LOGIN_SUCCESS', { ip: req.ip || req.connection.remoteAddress, userId: user.id });
+
   const devInfo = db.prepare('INSERT INTO devices(user_id, device_name, created_at) VALUES(?,?,?)')
     .run(user.id, deviceName || 'device', now())
   const deviceId = devInfo.lastInsertRowid

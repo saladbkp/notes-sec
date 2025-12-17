@@ -1,0 +1,36 @@
+[2025-12-17T17:48:21.012Z] [IP_BLOCKED] {"ip":"::1","count":5,"blockedUntil":"2025-12-17T18:03:21.012Z"}
+[2025-12-17T17:48:21.235Z] [IP_BLOCKED_ACCESS_ATTEMPT] {"ip":"::1","blockedUntil":1765994601012}
+[2025-12-17T17:48:21.446Z] [IP_BLOCKED_ACCESS_ATTEMPT] {"ip":"::1","blockedUntil":1765994601012}
+[2025-12-17T17:48:21.658Z] [IP_BLOCKED_ACCESS_ATTEMPT] {"ip":"::1","blockedUntil":1765994601012}
+[2025-12-17T17:48:21.868Z] [IP_BLOCKED_ACCESS_ATTEMPT] {"ip":"::1","blockedUntil":1765994601012}
+[2025-12-17T17:48:22.078Z] [IP_BLOCKED_ACCESS_ATTEMPT] {"ip":"::1","blockedUntil":1765994601012}
+[2025-12-17T17:48:22.285Z] [IP_BLOCKED_ACCESS_ATTEMPT] {"ip":"::1","blockedUntil":1765994601012}
+[2025-12-17T17:48:22.495Z] [IP_BLOCKED_ACCESS_ATTEMPT] {"ip":"::1","blockedUntil":1765994601012}
+[2025-12-17T17:48:22.702Z] [IP_BLOCKED_ACCESS_ATTEMPT] {"ip":"::1","blockedUntil":1765994601012}
+[2025-12-17T17:48:22.910Z] [IP_BLOCKED_ACCESS_ATTEMPT] {"ip":"::1","blockedUntil":1765994601012}
+[2025-12-17T17:54:25.478Z] [LOGIN_ATTEMPT] {"ip":"::1","email":"' OR '1'='1","deviceName":"sql-injector"}
+[2025-12-17T17:54:25.482Z] [LOGIN_FAILED] {"ip":"::1","reason":"user_not_found","email":"' OR '1'='1"}
+[2025-12-17T17:54:25.504Z] [LOGIN_ATTEMPT] {"ip":"::1","email":"' OR 1=1 --","deviceName":"sql-injector"}
+[2025-12-17T17:54:25.505Z] [LOGIN_FAILED] {"ip":"::1","reason":"user_not_found","email":"' OR 1=1 --"}
+[2025-12-17T17:54:25.513Z] [LOGIN_ATTEMPT] {"ip":"::1","email":"admin' --","deviceName":"sql-injector"}
+[2025-12-17T17:54:25.515Z] [IP_BLOCKED] {"ip":"::1","attempts":3,"window":"5s","blockedUntil":"2025-12-17T18:09:25.514Z"}
+[2025-12-17T17:54:25.515Z] [LOGIN_FAILED] {"ip":"::1","reason":"user_not_found","email":"admin' --"}
+[2025-12-17T17:54:25.522Z] [IP_BLOCKED_ACCESS_ATTEMPT] {"ip":"::1","blockedUntil":"2025-12-17T18:09:25.514Z"}
+[2025-12-17T17:55:32.330Z] [LOGIN_ATTEMPT] {"ip":"::1","email":"abc123@gmail.com","deviceName":"web"}
+[2025-12-17T17:55:32.706Z] [LOGIN_SUCCESS] {"ip":"::1","userId":1}
+[2025-12-17T17:55:52.620Z] [CLIENT_EVENT] {"type":"normal_event","ip":"::1","details":{"event":"note_unlock_fail_wrong_password","noteId":9}}
+[2025-12-17T17:55:53.193Z] [CLIENT_REPORTED_INTRUSION] {"type":"unlock_fail","ip":"::1","noteId":9}
+[2025-12-17T17:58:23.935Z] [LOGIN_ATTEMPT] {"ip":"::1","email":"attacker1@example.com","deviceName":"attacker-script"}
+[2025-12-17T17:58:23.938Z] [LOGIN_FAILED] {"ip":"::1","reason":"user_not_found","email":"attacker1@example.com"}
+[2025-12-17T17:58:24.156Z] [LOGIN_ATTEMPT] {"ip":"::1","email":"attacker2@example.com","deviceName":"attacker-script"}
+[2025-12-17T17:58:24.157Z] [LOGIN_FAILED] {"ip":"::1","reason":"user_not_found","email":"attacker2@example.com"}
+[2025-12-17T17:58:24.362Z] [LOGIN_ATTEMPT] {"ip":"::1","email":"attacker3@example.com","deviceName":"attacker-script"}
+[2025-12-17T17:58:24.363Z] [IP_BLOCKED] {"ip":"::1","attempts":3,"window":"5s","blockedUntil":"2025-12-17T18:13:24.363Z"}
+[2025-12-17T17:58:24.363Z] [LOGIN_FAILED] {"ip":"::1","reason":"user_not_found","email":"attacker3@example.com"}
+[2025-12-17T17:58:24.570Z] [IP_BLOCKED_ACCESS_ATTEMPT] {"ip":"::1","blockedUntil":"2025-12-17T18:13:24.363Z"}
+[2025-12-17T17:58:24.776Z] [IP_BLOCKED_ACCESS_ATTEMPT] {"ip":"::1","blockedUntil":"2025-12-17T18:13:24.363Z"}
+[2025-12-17T17:58:24.982Z] [IP_BLOCKED_ACCESS_ATTEMPT] {"ip":"::1","blockedUntil":"2025-12-17T18:13:24.363Z"}
+[2025-12-17T17:58:25.189Z] [IP_BLOCKED_ACCESS_ATTEMPT] {"ip":"::1","blockedUntil":"2025-12-17T18:13:24.363Z"}
+[2025-12-17T17:58:25.396Z] [IP_BLOCKED_ACCESS_ATTEMPT] {"ip":"::1","blockedUntil":"2025-12-17T18:13:24.363Z"}
+[2025-12-17T17:58:25.604Z] [IP_BLOCKED_ACCESS_ATTEMPT] {"ip":"::1","blockedUntil":"2025-12-17T18:13:24.363Z"}
+[2025-12-17T17:58:25.813Z] [IP_BLOCKED_ACCESS_ATTEMPT] {"ip":"::1","blockedUntil":"2025-12-17T18:13:24.363Z"}

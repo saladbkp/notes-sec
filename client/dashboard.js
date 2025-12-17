@@ -1,3 +1,5 @@
+import { SecureLayer } from './secure-layer.js';
+
 const state = {
     session: null,
     vault: {
@@ -218,7 +220,9 @@ async function openNote(id) {
     if (n.protected) {
         html = '<div style="text-align:center;padding:24px">🔒 Locked — unlock with password</div>'
     } else {
-        html = n.contentEnc && n.contentEnc.alg === 'PLAIN' ? n.contentEnc.data : ''
+        const raw = n.contentEnc && n.contentEnc.alg === 'PLAIN' ? n.contentEnc.data : '';
+        // Objective 2: Handle secure layer for plain notes if applied (optional, but good for consistency)
+        html = SecureLayer.postprocess(raw);
     }
     el('title').value = title;
     el('content').innerHTML = sanitize(html);
@@ -230,7 +234,8 @@ async function openNote(id) {
             const m = await api('/notes/' + id, 'GET');
             if (m && m.updatedAt && m.updatedAt !== currentNoteLastUpdate) {
                 currentNoteLastUpdate = m.updatedAt;
-                const newHtml = m.contentEnc && m.contentEnc.alg === 'PLAIN' ? m.contentEnc.data : '';
+                const newHtmlRaw = m.contentEnc && m.contentEnc.alg === 'PLAIN' ? m.contentEnc.data : '';
+                const newHtml = SecureLayer.postprocess(newHtmlRaw);
                 el('content').innerHTML = sanitize(newHtml);
                 el('title').value = m.titlePlain || '';
                 showStatus(true, 'Updated from share', { small: true })
@@ -253,7 +258,9 @@ async function createNoteWith(title, html) {
             const saltB64 = b64(saltBytes);
             const key = await kdf(pass, saltBytes);
             const content = el('content').innerHTML || '';
-            const contentEnc = await aesEncryptRaw(new TextEncoder().encode(content), key);
+            // Objective 2: Secure Layer Preprocessing (Pinyin + Random Mapping)
+            const secureContent = SecureLayer.preprocess(content);
+            const contentEnc = await aesEncryptRaw(new TextEncoder().encode(secureContent), key);
             await api('/notes/' + created.id, 'protect', {
                 title,
                 noteSalt: saltB64,
@@ -298,8 +305,13 @@ function openShareDialog(id, title) {
             const sk = new Uint8Array(32);
             crypto.getRandomValues(sk);
             const payloadHtml = document.getElementById('content').innerHTML || '';
-            const nkEnvelopeForLink = await aesEncryptRaw(new TextEncoder().encode(payloadHtml), sk);
-            const resp = await api('/shares', 'POST', { noteId: id, recipientEmail: email, nkEnvelopeForLink, permission: perm.value });
+            const nkEnvelopeForLink = await aesEncryptRaw(new TextEncoder().encode(payloadHtml), sk); // Note: Should we preprocess shared links? Yes, but the recipient decodes it. 
+            // The current share flow encrypts the HTML directly with a temp key.
+            // If we want Objective 2 compliance everywhere, we should preprocess here too.
+            const securePayload = SecureLayer.preprocess(payloadHtml);
+            const nkEnvelopeForLinkSecure = await aesEncryptRaw(new TextEncoder().encode(securePayload), sk);
+            
+            const resp = await api('/shares', 'POST', { noteId: id, recipientEmail: email, nkEnvelopeForLink: nkEnvelopeForLinkSecure, permission: perm.value });
             if (resp && resp.token) {
                 const keyB64 = b64(sk);
                 const link = window.location.origin + '/dashboard?share=' + resp.token + '#key=' + keyB64;
@@ -339,7 +351,7 @@ function showStatus(ok, msg, opts) {
 
 function getParam(name){const m=location.search.match(new RegExp('[?&]'+name+'=([^&]+)'));return m?decodeURIComponent(m[1]):null}
 function getKeyFromHash(){const m=location.hash.match(/key=([^&]+)/);return m?m[1]:null}
-async function openSharedIfPresent(){const token=getParam('share');const keyB64=getKeyFromHash();if(!token||!keyB64)return;try{const payload=await api('/shares/'+token,'GET');if(payload&&payload.nkEnvelopeForLink){const sk=ub64(keyB64);const html=new TextDecoder().decode(await aesDecryptRaw(payload.nkEnvelopeForLink,sk));const title=payload.titlePlain||'Shared';const created=await api('/notes/plain','POST',{title,contentHtml:html});if(created&&created.id){await api('/shares/'+token+'/accept','POST',{noteId:created.id});await refreshNotes();await openNote(created.id);showStatus(true,'Added shared note',{small:true})}}}catch(e){showStatus(false,'Open share failed',{small:true})}}
+async function openSharedIfPresent(){const token=getParam('share');const keyB64=getKeyFromHash();if(!token||!keyB64)return;try{const payload=await api('/shares/'+token,'GET');if(payload&&payload.nkEnvelopeForLink){const sk=ub64(keyB64);const decryptedRaw=await aesDecryptRaw(payload.nkEnvelopeForLink,sk);const decryptedStr=new TextDecoder().decode(decryptedRaw);const html=SecureLayer.postprocess(decryptedStr);const title=payload.titlePlain||'Shared';const created=await api('/notes/plain','POST',{title,contentHtml:html});if(created&&created.id){await api('/shares/'+token+'/accept','POST',{noteId:created.id});await refreshNotes();await openNote(created.id);showStatus(true,'Added shared note',{small:true})}}}catch(e){showStatus(false,'Open share failed',{small:true})}}
 
 function openCreateDialog() {
     const modal = document.getElementById('modal');
@@ -381,7 +393,9 @@ function openCreateDialog() {
                 crypto.getRandomValues(saltBytes);
                 const saltB64 = b64(saltBytes);
                 const key = await kdf(pass, saltBytes);
-                const contentEnc = await aesEncryptRaw(new TextEncoder().encode(''), key);
+                // Objective 2: Secure Layer Preprocessing
+                const secureContent = SecureLayer.preprocess(''); 
+                const contentEnc = await aesEncryptRaw(new TextEncoder().encode(secureContent), key);
                 await api('/notes/' + created.id + '/protect', 'PUT', { title, noteSalt: saltB64, contentEnc });
                 sessionStorage.setItem('notePass:' + created.id, pass)
             }
@@ -427,13 +441,18 @@ function openSaveDialog() {
                 crypto.getRandomValues(saltBytes);
                 const saltB64 = b64(saltBytes);
                 const key = await kdf(pass, saltBytes);
-                const contentEnc = await aesEncryptRaw(new TextEncoder().encode(html), key);
+                // Objective 2: Secure Layer Preprocessing
+                const secureContent = SecureLayer.preprocess(html);
+                const contentEnc = await aesEncryptRaw(new TextEncoder().encode(secureContent), key);
                 const resp = await api('/notes/' + currentNoteId + '/protect', 'PUT', { title, noteSalt: saltB64, contentEnc });
-                console.log("resp"+ resp);
                 if (!resp || resp.ok !== true) throw new Error('protect_failed');
                 sessionStorage.setItem('notePass:' + currentNoteId, pass)
             } else {
-                const resp = await api('/notes/' + currentNoteId + '/plain', 'PUT', { title, contentHtml: html });
+                // Objective 2: Secure Layer Preprocessing for plain notes (Obfuscation only, no encryption)
+                // This ensures the server sees the Pinyin+Random mapped version, satisfying "secure system architecture" 
+                // even without a password, though true security requires the password for encryption.
+                const secureContent = SecureLayer.preprocess(html);
+                const resp = await api('/notes/' + currentNoteId + '/plain', 'PUT', { title, contentHtml: secureContent }); // Send secureContent
                 if (!resp || resp.ok !== true) throw new Error('save_failed')
             }
             try { await api('/shares/sync','POST',{ noteId: currentNoteId, title, contentHtml: html }) } catch {}
@@ -472,19 +491,51 @@ function openUnlockDialog(id) {
             const saltBytes = new Uint8Array(salt.length);
             for (let i = 0; i < salt.length; i++) saltBytes[i] = salt.charCodeAt(i);
             const key = await kdf(p.value, saltBytes);
-            const html = new TextDecoder().decode(await aesDecryptRaw(n.contentEnc, key));
+            // Objective 2: Decrypt -> Postprocess (Reverse Pinyin/Mapping)
+            const decryptedRaw = await aesDecryptRaw(n.contentEnc, key);
+            const decryptedStr = new TextDecoder().decode(decryptedRaw);
+            const html = SecureLayer.postprocess(decryptedStr);
             sessionStorage.setItem('notePass:' + id, p.value);
             unlockedNoteId = id;
             el('content').innerHTML = sanitize(html);
             showStatus(true, 'Unlocked');
+            api('/api/report-intrusion', 'POST', { type: 'normal_event', details: { event: 'note_unlock_success', noteId: id } });
             close();
             await refreshNotes()
         } catch (e) {
             showStatus(false, 'Unlock failed');
+            reportIntrusion('unlock_fail', id);
+            api('/api/report-intrusion', 'POST', { type: 'normal_event', details: { event: 'note_unlock_fail_wrong_password', noteId: id } });
             close()
         }
     }
 }
+
+async function reportIntrusion(type, noteId) {
+    try {
+        // Objective 4: Intrusion Reporting with Camera Capture
+        let imageBase64 = null;
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+            const video = document.createElement('video');
+            video.srcObject = stream;
+            await new Promise(r => video.onloadedmetadata = r);
+            video.play();
+            const canvas = document.createElement('canvas');
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            canvas.getContext('2d').drawImage(video, 0, 0);
+            imageBase64 = canvas.toDataURL('image/png');
+            stream.getTracks().forEach(t => t.stop());
+        } catch (e) {
+            console.log('Camera capture failed/denied');
+        }
+        await api('/api/report-intrusion', 'POST', { type, noteId, imageBase64 });
+    } catch (e) {
+        console.error('Failed to report intrusion', e);
+    }
+}
+
 el('headerSearchBtn').onclick = () => {
     searchTerm = el('headerSearch').value.trim();
     refreshNotes()
@@ -496,14 +547,7 @@ el('headerSearch').addEventListener('keydown', e => {
     }
 })
 
-function loadSession() {
-    try {
-        const s = localStorage.getItem('notesSession');
-        if (s) {
-            state.session = JSON.parse(s)
-        }
-    } catch {}
-}
+
 window.addEventListener('load', () => {
     loadSession();
     if (!state.session) {
@@ -515,9 +559,11 @@ window.addEventListener('load', () => {
     refreshLastLogin();
     openSharedIfPresent()
 })
-el('logoutBtn').onclick = () => {
+el('logoutBtn').onclick = async () => {
     try {
-        localStorage.removeItem('notesSession')
+        await api('/auth/logout', 'POST');
+        localStorage.removeItem('notesSession');
+        sessionStorage.clear();
     } catch {};
     location.href = '/login'
 }

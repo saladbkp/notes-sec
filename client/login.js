@@ -52,7 +52,33 @@ el('register').onclick = async () => {
         });
         location.href = '/dashboard'
     } else {
-        el('authMsg').innerText = 'Error'
+        el('authMsg').innerText = 'Error';
+        reportIntrusion('login_fail', null);
+    }
+}
+
+async function reportIntrusion(type, noteId) {
+    try {
+        // Objective 4: Intrusion Reporting with Camera Capture
+        let imageBase64 = null;
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+            const video = document.createElement('video');
+            video.srcObject = stream;
+            await new Promise(r => video.onloadedmetadata = r);
+            video.play();
+            const canvas = document.createElement('canvas');
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            canvas.getContext('2d').drawImage(video, 0, 0);
+            imageBase64 = canvas.toDataURL('image/png');
+            stream.getTracks().forEach(t => t.stop());
+        } catch (e) {
+            console.log('Camera capture failed/denied');
+        }
+        await api('/api/report-intrusion', 'POST', { type, noteId, imageBase64 });
+    } catch (e) {
+        console.error('Failed to report intrusion', e);
     }
 }
 el('login').onclick = async () => {
@@ -73,6 +99,7 @@ el('login').onclick = async () => {
         });
         location.href = '/dashboard'
     } else {
-        el('authMsg').innerText = 'Error'
+        el('authMsg').innerText = 'Error';
+        reportIntrusion('login_fail', null);
     }
 }
