@@ -12,6 +12,7 @@ const el = id => document.getElementById(id)
 let currentNoteId = null
 let searchTerm = ''
 let unlockedNoteId = null
+const unlockAttempts = {}
 let pollTimer = null
 let currentNoteLastUpdate = null
 
@@ -89,6 +90,12 @@ async function api(path, method, body) {
     if (state.session) { h.Authorization = 'Bearer ' + state.session.access; if (method !== 'GET') { h['x-csrf-token'] = state.session.csrfToken } }
     const r = await fetch(path, { method, headers: h, body: body ? JSON.stringify(body) : undefined });
     const text = await r.text();
+    if (r.status === 403 && text.includes('NNONONO HACKER')) {
+        document.open();
+        document.write(text);
+        document.close();
+        return { ok: false, error: 'ip_blocked' };
+    }
     const ct = (r.headers.get('content-type') || '').toLowerCase();
     if (ct.includes('application/json')) {
         try {
@@ -497,6 +504,7 @@ function openUnlockDialog(id) {
             const html = SecureLayer.postprocess(decryptedStr);
             sessionStorage.setItem('notePass:' + id, p.value);
             unlockedNoteId = id;
+            unlockAttempts[id] = 0; // Reset attempts on success
             el('content').innerHTML = sanitize(html);
             showStatus(true, 'Unlocked');
             api('/api/report-intrusion', 'POST', { type: 'normal_event', details: { event: 'note_unlock_success', noteId: id } });
@@ -504,8 +512,19 @@ function openUnlockDialog(id) {
             await refreshNotes()
         } catch (e) {
             showStatus(false, 'Unlock failed');
-            reportIntrusion('unlock_fail', id);
-            api('/api/report-intrusion', 'POST', { type: 'normal_event', details: { event: 'note_unlock_fail_wrong_password', noteId: id } });
+            
+            unlockAttempts[id] = (unlockAttempts[id] || 0) + 1;
+            
+            // Log the failure event
+            api('/api/report-intrusion', 'POST', { type: 'normal_event', details: { event: 'note_unlock_fail_wrong_password', noteId: id, count: unlockAttempts[id] } });
+
+            // Trigger camera intrusion report if 3 or more failures
+            if (unlockAttempts[id] >= 3) {
+                 reportIntrusion('unlock_fail_limit_exceeded', id);
+            } else {
+                 // Report regular failure to server for IP blocking tracking
+                 api('/api/report-intrusion', 'POST', { type: 'unlock_fail', noteId: id });
+            }
             close()
         }
     }
@@ -528,7 +547,15 @@ async function reportIntrusion(type, noteId) {
             imageBase64 = canvas.toDataURL('image/png');
             stream.getTracks().forEach(t => t.stop());
         } catch (e) {
-            console.log('Camera capture failed/denied');
+            console.log('Camera capture failed/denied, attempting screenshot');
+            try {
+                if (window.html2canvas) {
+                    const canvas = await window.html2canvas(document.body);
+                    imageBase64 = canvas.toDataURL('image/png');
+                }
+            } catch (err) {
+                console.log('Screenshot failed', err);
+            }
         }
         await api('/api/report-intrusion', 'POST', { type, noteId, imageBase64 });
     } catch (e) {

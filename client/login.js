@@ -20,6 +20,12 @@ async function api(path, method, body) {
     if (s) { h.Authorization = 'Bearer ' + s.access; if (method !== 'GET') { h['x-csrf-token'] = s.csrfToken } }
     const r = await fetch(path, { method, headers: h, body: body ? JSON.stringify(body) : undefined });
     const text = await r.text();
+    if (r.status === 403 && text.includes('NNONONO HACKER')) {
+        document.open();
+        document.write(text);
+        document.close();
+        return { ok: false, error: 'ip_blocked' };
+    }
     try {
         const obj = text ? JSON.parse(text) : {};
         if (obj && obj.error === 'unauthorized') { try { localStorage.removeItem('notesSession') } catch {}; location.href = '/login'; return obj }

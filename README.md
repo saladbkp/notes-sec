@@ -156,6 +156,12 @@ testing payload ->
 3. brute force attack on note creation
 4. sql injection attack on note creation
 
+12/24
+camera capture for login fail, note password fail
+ip blocking for 5s if 3 failed attempts
+refresh can see nonono hacker
+check /logs/  
+
 remind current username and password 
 abc123@gmail.com abc123
 test@gmail.com test

@@ -30,6 +30,21 @@ const db = new Database(dbPath)
 // Intrusion Detection: Log file path
 const detectionLogPath = path.join(process.cwd(), 'logs', 'detection.log');
 
+const ipBlockingLogPath = path.join(process.cwd(), 'logs', 'ip_blocking.txt');
+
+function logIpBlocking(ip, reason, details) {
+    console.log(`[DEBUG] logIpBlocking called for ${ip}`);
+    const timestamp = new Date().toISOString();
+    const logEntry = `[${timestamp}] [${reason}] IP: ${ip} Details: ${JSON.stringify(details)}\n`;
+    try {
+        console.log(`[DEBUG] Writing to ${ipBlockingLogPath}`);
+        fs.appendFileSync(ipBlockingLogPath, logEntry);
+        console.log(`[DEBUG] Successfully wrote to ${ipBlockingLogPath}`);
+    } catch (e) {
+        console.error('Failed to write ip_blocking log:', e);
+    }
+}
+
 // Helper to log intrusion events
 function logIntrusion(event, details) {
     const timestamp = new Date().toISOString();
@@ -52,10 +67,36 @@ function checkIpBlock(req, res, next) {
     const record = ipFailures.get(ip);
     if (record && record.blockedUntil > Date.now()) {
         logIntrusion('IP_BLOCKED_ACCESS_ATTEMPT', { ip, blockedUntil: new Date(record.blockedUntil).toISOString() });
-        return res.status(403).json({ error: 'ip_blocked', message: 'Too many failed attempts. Try again later.' });
+        return res.status(403).send(`
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Access Denied</title>
+    <style>
+        body {
+            background-color: black;
+            color: red;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            font-family: monospace;
+            font-size: 5rem;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    NNONONO HACKER
+</body>
+</html>
+        `);
     }
     next();
 }
+
+app.use(checkIpBlock);
 
 function recordFailure(ip) {
     const now = Date.now();
@@ -76,6 +117,7 @@ function recordFailure(ip) {
         record.blockedUntil = now + BLOCK_DURATION;
         record.attempts = []; // Reset attempts after blocking
         logIntrusion('IP_BLOCKED', { ip, attempts: BLOCK_THRESHOLD, window: '5s', blockedUntil: new Date(record.blockedUntil).toISOString() });
+        logIpBlocking(ip, 'IP_BLOCKED_THRESHOLD_EXCEEDED', { attempts: BLOCK_THRESHOLD, window: '5s', blockedUntil: new Date(record.blockedUntil).toISOString() });
     }
 }
 
@@ -111,7 +153,7 @@ app.post('/api/report-intrusion', (req, res) => {
     }
     
     // If it's a login failure or unlock failure, record for IP blocking
-    if (type === 'login_fail' || type === 'unlock_fail') {
+    if (type === 'login_fail' || type === 'unlock_fail' || type === 'unlock_fail_limit_exceeded') {
         recordFailure(ip);
     }
     
