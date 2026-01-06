@@ -167,3 +167,9 @@ abc123@gmail.com abc123
 test@gmail.com test
 
 note password -> a / test
+
+7/1 email features
+rmb email password
+fypaper2026@gmail.com
+asdfghjkl;'
+done

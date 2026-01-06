@@ -32,7 +32,66 @@ const detectionLogPath = path.join(process.cwd(), 'logs', 'detection.log');
 
 const ipBlockingLogPath = path.join(process.cwd(), 'logs', 'ip_blocking.txt');
 
-function logIpBlocking(ip, reason, details) {
+// Load environment variables manually
+const envPath = path.join(process.cwd(), '.env');
+const env = {};
+if (fs.existsSync(envPath)) {
+    const lines = fs.readFileSync(envPath, 'utf8').split('\n');
+    lines.forEach(line => {
+        const parts = line.split('=');
+        if (parts.length >= 2) {
+            const key = parts[0].trim();
+            const val = parts.slice(1).join('=').trim();
+            env[key] = val;
+        }
+    });
+}
+
+async function sendEmailAlert(event, ip, details, toEmail) {
+    if (!env.REACT_APP_EMAILJS_SERVICE_ID || !env.REACT_APP_EMAILJS_PUBLIC_KEY) {
+        console.log('[EmailJS] Missing configuration, skipping email alert.');
+        return;
+    }
+
+    // Default to admin/configured email if no specific target
+    const logEmail = toEmail ? toEmail : 'admin';
+    console.log(`[EmailJS] Sending alert for ${event} from ${ip} to ${logEmail}`);
+    
+    const payload = {
+        service_id: env.REACT_APP_EMAILJS_SERVICE_ID,
+        template_id: env.REACT_APP_EMAILJS_TEMPLATE_ID,
+        user_id: env.REACT_APP_EMAILJS_PUBLIC_KEY,
+        accessToken: env.REACT_APP_EMAILJS_PRIVATE_KEY,
+        template_params: {
+            event_type: event,
+            ip_address: ip,
+            timestamp: new Date().toISOString(),
+            details: JSON.stringify(details),
+            name: toEmail // Pass victim email to template
+        }
+    };
+
+    try {
+        const response = await fetch('https://api.emailjs.com/api/v1.0/email/send', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload)
+        });
+
+        if (response.ok) {
+            console.log(`[EmailJS] Email sent successfully to ${logEmail}.`);
+        } else {
+            const text = await response.text();
+            console.error('[EmailJS] Failed to send email:', response.status, text);
+        }
+    } catch (error) {
+        console.error('[EmailJS] Error sending email:', error);
+    }
+}
+
+function logIpBlocking(ip, reason, details, targetedEmails = []) {
     console.log(`[DEBUG] logIpBlocking called for ${ip}`);
     const timestamp = new Date().toISOString();
     const logEntry = `[${timestamp}] [${reason}] IP: ${ip} Details: ${JSON.stringify(details)}\n`;
@@ -40,6 +99,17 @@ function logIpBlocking(ip, reason, details) {
         console.log(`[DEBUG] Writing to ${ipBlockingLogPath}`);
         fs.appendFileSync(ipBlockingLogPath, logEntry);
         console.log(`[DEBUG] Successfully wrote to ${ipBlockingLogPath}`);
+        
+        // Trigger Email Alert for each targeted email
+        if (targetedEmails && targetedEmails.length > 0) {
+            targetedEmails.forEach(email => {
+                sendEmailAlert(reason, ip, details, email);
+            });
+        } else {
+            // Fallback if no specific email known (or generic block)
+            sendEmailAlert(reason, ip, details);
+        }
+        
     } catch (e) {
         console.error('Failed to write ip_blocking log:', e);
     }
@@ -98,16 +168,19 @@ function checkIpBlock(req, res, next) {
 
 app.use(checkIpBlock);
 
-function recordFailure(ip) {
+function recordFailure(ip, email = null) {
     const now = Date.now();
     let record = ipFailures.get(ip);
     if (!record) {
-        record = { attempts: [], blockedUntil: 0 };
+        record = { attempts: [], blockedUntil: 0, targetedEmails: new Set() };
         ipFailures.set(ip, record);
     }
 
     // Add new failure timestamp
     record.attempts.push(now);
+    if (email) {
+        record.targetedEmails.add(email);
+    }
 
     // Remove attempts outside the window
     record.attempts = record.attempts.filter(t => now - t <= ATTEMPT_WINDOW);
@@ -115,9 +188,13 @@ function recordFailure(ip) {
     // Check threshold
     if (record.attempts.length >= BLOCK_THRESHOLD) {
         record.blockedUntil = now + BLOCK_DURATION;
+        const targets = Array.from(record.targetedEmails);
+        
         record.attempts = []; // Reset attempts after blocking
+        record.targetedEmails.clear();
+        
         logIntrusion('IP_BLOCKED', { ip, attempts: BLOCK_THRESHOLD, window: '5s', blockedUntil: new Date(record.blockedUntil).toISOString() });
-        logIpBlocking(ip, 'IP_BLOCKED_THRESHOLD_EXCEEDED', { attempts: BLOCK_THRESHOLD, window: '5s', blockedUntil: new Date(record.blockedUntil).toISOString() });
+        logIpBlocking(ip, 'IP_BLOCKED_THRESHOLD_EXCEEDED', { attempts: BLOCK_THRESHOLD, window: '5s', blockedUntil: new Date(record.blockedUntil).toISOString() }, targets);
     }
 }
 
@@ -329,13 +406,13 @@ app.post('/auth/login', checkIpBlock, (req, res) => {
 
   const user = db.prepare('SELECT * FROM users WHERE email=?').get(email)
   if (!user) {
-    recordFailure(req.ip || req.connection.remoteAddress)
+    recordFailure(req.ip || req.connection.remoteAddress, email)
     logIntrusion('LOGIN_FAILED', { ip: req.ip || req.connection.remoteAddress, reason: 'user_not_found', email });
     return res.status(401).json({ error: 'invalid' })
   }
   const ok = bcrypt.compareSync(authPassword + user.auth_salt, user.auth_hash)
   if (!ok) {
-    recordFailure(req.ip || req.connection.remoteAddress)
+    recordFailure(req.ip || req.connection.remoteAddress, email)
     logIntrusion('LOGIN_FAILED', { ip: req.ip || req.connection.remoteAddress, reason: 'password_mismatch', email });
     return res.status(401).json({ error: 'invalid' })
   }

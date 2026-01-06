@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f4;
+            margin: 0;
+            padding: 20px;
+        }
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            background-color: #ffffff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            border-left: 6px solid #ff4444;
+        }
+        .header {
+            color: #ff4444;
+            font-size: 24px;
+            margin-bottom: 20px;
+            border-bottom: 1px solid #eee;
+            padding-bottom: 10px;
+        }
+        .content {
+            color: #333;
+            line-height: 1.6;
+        }
+        .detail-box {
+            background-color: #f9f9f9;
+            border: 1px solid #ddd;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 4px;
+            font-family: monospace;
+        }
+        .footer {
+            margin-top: 20px;
+            font-size: 12px;
+            color: #888;
+            text-align: center;
+        }
+        .warning-icon {
+            display: inline-block;
+            width: 24px;
+            height: 24px;
+            background-color: #ff4444;
+            color: white;
+            text-align: center;
+            border-radius: 50%;
+            line-height: 24px;
+            margin-right: 10px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <span class="warning-icon">!</span>
+            Security Alert: Suspicious Activity Detected
+        </div>
+        <div class="content">
+            <p>Hello,</p>
+            <p>Our security system has detected suspicious activity on your Notes App.</p>
+            
+            <div class="detail-box">
+                <p><strong>Event Type:</strong> {{event_type}}</p>
+                <p><strong>IP Address:</strong> {{ip_address}}</p>
+                <p><strong>Time:</strong> {{timestamp}}</p>
+                <p><strong>Details:</strong> {{details}}</p>
+            </div>
+
+            <p>If this was you, you can ignore this message. However, if you do not recognize this activity, please take immediate action to secure your account.</p>
+        </div>
+        <div class="footer">
+            <p>This is an automated security notification from Notes App Security System.</p>
+        </div>
+    </div>
+</body>
+</html>
