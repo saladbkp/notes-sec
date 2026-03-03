@@ -47,19 +47,31 @@ if (fs.existsSync(envPath)) {
     });
 }
 
-async function sendEmailAlert(event, ip, details, toEmail) {
+async function sendEmailAlert(event, ip, details, toEmail, evidenceImage = null) {
     if (!env.REACT_APP_EMAILJS_SERVICE_ID || !env.REACT_APP_EMAILJS_PUBLIC_KEY) {
         console.log('[EmailJS] Missing configuration, skipping email alert.');
         return;
     }
 
     // Default to admin/configured email if no specific target
-    const logEmail = toEmail ? toEmail : 'admin';
+    const logEmail = toEmail ? toEmail : 'fypaper2026@gmail.com';
     console.log(`[EmailJS] Sending alert for ${event} from ${ip} to ${logEmail}`);
     
+    // Check evidence image size (EmailJS limit ~50KB for all params)
+    let finalEvidence = evidenceImage;
+    if (evidenceImage && evidenceImage.length > 25000) {
+        console.log(`[EmailJS] Evidence image too large (${evidenceImage.length} chars), skipping image.`);
+        finalEvidence = null; // Or send a placeholder text?
+    }
+
+    // Select template ID based on event type
+    const templateId = (event === 'OTP_REQUEST' && env.REACT_APP_EMAILJS_TEMPLATE_OTP) 
+        ? env.REACT_APP_EMAILJS_TEMPLATE_OTP 
+        : env.REACT_APP_EMAILJS_TEMPLATE_ID;
+
     const payload = {
         service_id: env.REACT_APP_EMAILJS_SERVICE_ID,
-        template_id: env.REACT_APP_EMAILJS_TEMPLATE_ID,
+        template_id: templateId,
         user_id: env.REACT_APP_EMAILJS_PUBLIC_KEY,
         accessToken: env.REACT_APP_EMAILJS_PRIVATE_KEY,
         template_params: {
@@ -67,7 +79,11 @@ async function sendEmailAlert(event, ip, details, toEmail) {
             ip_address: ip,
             timestamp: new Date().toISOString(),
             details: JSON.stringify(details),
-            name: toEmail // Pass victim email to template
+            name: logEmail, // Use resolved email (with fallback) instead of potentially null toEmail
+            to_email: logEmail, // Add explicit to_email parameter just in case template uses it
+            evidence_image: finalEvidence, // Base64 image or URL
+                    evidence_filename: finalEvidence ? `evidence_${new Date().getTime()}.jpg` : null, // Dynamic filename
+                    otp: details.otp // Pass OTP explicitly if present
         }
     };
 
@@ -128,11 +144,18 @@ function logIntrusion(event, details) {
 
 // IP Blocking Map (Simple in-memory implementation)
 const ipFailures = new Map();
+const otpStore = new Map(); // Store OTPs: ip -> { code, expires }
 const BLOCK_THRESHOLD = 3;
-const BLOCK_DURATION = 15 * 60 * 1000; // 15 minutes
+const lockDurationHours = env.LOCK_DURATION_HOURS ? parseInt(env.LOCK_DURATION_HOURS) : 1;
+const BLOCK_DURATION = lockDurationHours * 60 * 60 * 1000; 
 const ATTEMPT_WINDOW = 5000; // 5 seconds
 
 function checkIpBlock(req, res, next) {
+    // Allow unblock endpoints
+    if (req.path === '/auth/unblock-request' || req.path === '/auth/unblock-verify') {
+        return next();
+    }
+
     const ip = req.ip || req.connection.remoteAddress;
     const record = ipFailures.get(ip);
     if (record && record.blockedUntil > Date.now()) {
@@ -144,21 +167,105 @@ function checkIpBlock(req, res, next) {
     <title>Access Denied</title>
     <style>
         body {
-            background-color: black;
-            color: red;
+            background-color: #1a1a1a;
+            color: #ff4444;
             display: flex;
+            flex-direction: column;
             justify-content: center;
             align-items: center;
             height: 100vh;
             margin: 0;
             font-family: monospace;
-            font-size: 5rem;
-            font-weight: bold;
         }
+        h1 { font-size: 3rem; margin-bottom: 20px; }
+        .container { text-align: center; background: #333; padding: 20px; border-radius: 8px; }
+        input { padding: 10px; margin: 10px; font-size: 1.2rem; }
+        button { padding: 10px 20px; font-size: 1.2rem; cursor: pointer; background: #ff4444; color: white; border: none; }
+        .msg { color: #ccc; margin-top: 10px; }
     </style>
 </head>
 <body>
-    NNONONO HACKER
+    <h1>ACCESS BLOCKED</h1>
+    <div class="container">
+        <p>Your IP has been temporarily blocked due to suspicious activity.</p>
+        <p>Block expires in: ${Math.ceil((record.blockedUntil - Date.now()) / 60000)} minutes</p>
+        
+        <div id="request-section">
+            <p>To unblock immediately, request an OTP via email.</p>
+            <input type="email" id="email-input" placeholder="Enter your email" style="display: none; padding: 10px; margin: 10px; font-size: 1.2rem; width: 80%; max-width: 300px;" />
+            <br/>
+            <button onclick="requestOtp()">Request OTP</button>
+        </div>
+
+        <div id="verify-section" style="display:none; margin-top: 20px;">
+            <input type="text" id="otp" placeholder="Enter 6-digit PIN" maxlength="6" />
+            <button onclick="verifyOtp()">Unlock</button>
+        </div>
+        <div id="status" class="msg"></div>
+    </div>
+
+    <script>
+        // Check if we need to show email input based on error
+        let emailRequired = false;
+
+        async function requestOtp() {
+            const status = document.getElementById('status');
+            const emailInput = document.getElementById('email-input');
+            const email = emailInput.value.trim();
+
+            status.innerText = 'Sending OTP...';
+            try {
+                const body = {};
+                if (emailRequired && email) {
+                    body.email = email;
+                }
+
+                const res = await fetch('/auth/unblock-request', { 
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                const data = await res.json();
+                if (data.ok) {
+                    status.innerText = 'OTP sent to your email.';
+                    document.getElementById('request-section').style.display = 'none';
+                    document.getElementById('verify-section').style.display = 'block';
+                } else {
+                    if (data.error === 'No email associated with this block.') {
+                        status.innerText = 'Please enter your email above to receive the OTP.';
+                        emailInput.style.display = 'block';
+                        emailRequired = true;
+                    } else {
+                        status.innerText = 'Error: ' + (data.error || 'Failed');
+                    }
+                }
+            } catch (e) {
+                status.innerText = 'Network error';
+            }
+        }
+
+        async function verifyOtp() {
+            const otp = document.getElementById('otp').value;
+            const status = document.getElementById('status');
+            if (!otp) return;
+            try {
+                const res = await fetch('/auth/unblock-verify', { 
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ otp })
+                });
+                const data = await res.json();
+                if (data.ok) {
+                    status.innerText = 'Unblocked! Redirecting...';
+                    setTimeout(() => location.reload(), 1000);
+                } else {
+                    status.innerText = 'Invalid OTP';
+                }
+            } catch (e) {
+                status.innerText = 'Network error';
+            }
+        }
+    </script>
 </body>
 </html>
         `);
@@ -204,6 +311,60 @@ app.post('/auth/logout', (req, res) => {
     res.json({ ok: true });
 });
 
+app.post('/auth/unblock-request', (req, res) => {
+    const ip = req.ip || req.connection.remoteAddress;
+    const { email: providedEmail } = req.body || {};
+    const record = ipFailures.get(ip);
+    
+    if (!record || record.blockedUntil <= Date.now()) {
+        return res.status(400).json({ error: 'Not blocked' });
+    }
+    
+    let emails = Array.from(record.targetedEmails);
+    if (emails.length === 0) {
+        if (providedEmail) {
+            // Validate email format if needed, for now just use it
+            emails = [providedEmail];
+            // Optionally add to record so future attempts use it
+            record.targetedEmails.add(providedEmail);
+        } else {
+            return res.status(400).json({ error: 'No email associated with this block.' });
+        }
+    }
+    
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    otpStore.set(ip, { code: otp, expires: Date.now() + 300000 }); // 5 mins
+    
+    // Send email to all targeted emails
+    emails.forEach(email => {
+        sendEmailAlert('OTP_REQUEST', ip, { otp }, email);
+    });
+    
+    res.json({ ok: true });
+});
+
+app.post('/auth/unblock-verify', (req, res) => {
+    const ip = req.ip || req.connection.remoteAddress;
+    const { otp } = req.body || {};
+    
+    const stored = otpStore.get(ip);
+    if (!stored || stored.code !== otp || stored.expires < Date.now()) {
+        return res.status(400).json({ error: 'Invalid or expired OTP' });
+    }
+    
+    // Unblock
+    const record = ipFailures.get(ip);
+    if (record) {
+        record.blockedUntil = 0;
+        record.attempts = [];
+        record.targetedEmails.clear();
+    }
+    otpStore.delete(ip);
+    
+    logIntrusion('IP_UNBLOCKED_BY_OTP', { ip });
+    res.json({ ok: true });
+});
+
 // Endpoint to report suspicious behavior (e.g., failed unlock) and upload evidence (screenshot/camera)
 app.post('/api/report-intrusion', (req, res) => {
     const { type, imageBase64, noteId, details } = req.body || {};
@@ -223,6 +384,10 @@ app.post('/api/report-intrusion', (req, res) => {
             try {
                 fs.writeFileSync(filepath, buffer);
                 logIntrusion('EVIDENCE_SAVED', { filename });
+
+                // Email sending removed as per user request
+                // sendEmailAlert('INTRUSION_EVIDENCE', ip, { ...details, type, filename }, null, imageBase64);
+
             } catch (e) {
                 console.error('Failed to save evidence:', e);
             }
@@ -235,6 +400,41 @@ app.post('/api/report-intrusion', (req, res) => {
     }
     
     res.json({ ok: true });
+});
+
+app.get('/api/latest-intrusion', (req, res) => {
+    const logsDir = path.join(process.cwd(), 'logs');
+    try {
+        if (!fs.existsSync(logsDir)) {
+            return res.json({ found: false });
+        }
+        
+        const files = fs.readdirSync(logsDir)
+            .filter(f => f.startsWith('evidence_') && (f.endsWith('.jpg') || f.endsWith('.png') || f.endsWith('.jpeg')))
+            .map(f => {
+                const stat = fs.statSync(path.join(logsDir, f));
+                return { name: f, time: stat.mtime.getTime() };
+            })
+            .sort((a, b) => b.time - a.time);
+
+        if (files.length > 0) {
+            const latest = files[0];
+            const content = fs.readFileSync(path.join(logsDir, latest.name));
+            const base64 = content.toString('base64');
+            const ext = latest.name.split('.').pop();
+            return res.json({ 
+                found: true, 
+                filename: latest.name, 
+                imageBase64: `data:image/${ext};base64,${base64}`,
+                timestamp: latest.time
+            });
+        }
+        
+        res.json({ found: false });
+    } catch (e) {
+        console.error('Error fetching evidence:', e);
+        res.status(500).json({ error: 'Failed to fetch evidence' });
+    }
 });
 
 db.exec(`
@@ -276,6 +476,7 @@ CREATE TABLE IF NOT EXISTS notes(
   size_padded INTEGER NOT NULL,
   protected INTEGER NOT NULL DEFAULT 0,
   note_salt TEXT,
+  idle_timeout INTEGER DEFAULT 60,
   shared INTEGER NOT NULL DEFAULT 0,
   share_permission TEXT,
   FOREIGN KEY(user_id) REFERENCES users(id)
@@ -332,6 +533,7 @@ try { db.exec('ALTER TABLE notes ADD COLUMN protected INTEGER NOT NULL DEFAULT 0
 try { db.exec('ALTER TABLE notes ADD COLUMN note_salt TEXT') } catch(e) {}
 try { db.exec('ALTER TABLE notes ADD COLUMN shared INTEGER NOT NULL DEFAULT 0') } catch(e) {}
 try { db.exec('ALTER TABLE notes ADD COLUMN share_permission TEXT') } catch(e) {}
+try { db.exec('ALTER TABLE notes ADD COLUMN idle_timeout INTEGER DEFAULT 60') } catch(e) {}
 try { db.exec('ALTER TABLE shares ADD COLUMN nk_envelope_for_link TEXT') } catch(e) {}
 try { db.exec('ALTER TABLE shares ADD COLUMN share_token TEXT UNIQUE') } catch(e) {}
 try { db.exec("ALTER TABLE shares ADD COLUMN permission TEXT DEFAULT 'ro'") } catch(e) {}
@@ -512,12 +714,12 @@ app.post('/notes/plain', auth, (req, res) => {
 })
 
 app.put('/notes/:id', auth, (req, res) => {
-  const { titleEnc, contentEnc } = req.body || {}
+  const { titleEnc, contentEnc, idleTimeout } = req.body || {}
   const note = db.prepare('SELECT id FROM notes WHERE id=? AND user_id=?').get(req.params.id, req.user.id)
   if (!note) return res.status(404).json({ error: 'not_found' })
   const sizePadded = Buffer.from(contentEnc.ciphertext || '').length
-  db.prepare('UPDATE notes SET title_encrypted=?, updated_at=?, size_padded=? WHERE id=?')
-    .run(JSON.stringify(titleEnc), now(), sizePadded, note.id)
+  db.prepare('UPDATE notes SET title_encrypted=?, updated_at=?, size_padded=?, idle_timeout=? WHERE id=?')
+    .run(JSON.stringify(titleEnc), now(), sizePadded, idleTimeout || 60, note.id)
   db.prepare('UPDATE note_blobs SET blob_encrypted=? WHERE note_id=? AND chunk_index=0')
     .run(Buffer.from(JSON.stringify(contentEnc)), note.id)
   audit(req.user.id, 'update_note', String(note.id), req)
@@ -525,11 +727,11 @@ app.put('/notes/:id', auth, (req, res) => {
 })
 
 app.put('/notes/:id/plain', auth, (req, res) => {
-  const { title, contentHtml } = req.body || {}
+  const { title, contentHtml, idleTimeout } = req.body || {}
   const note = db.prepare('SELECT id FROM notes WHERE id=? AND user_id=?').get(req.params.id, req.user.id)
   if (!note) return res.status(404).json({ error: 'not_found' })
-  db.prepare('UPDATE notes SET title_plain=?, protected=0, updated_at=?, size_padded=? WHERE id=?')
-    .run(title, now(), Buffer.byteLength(contentHtml || ''), note.id)
+  db.prepare('UPDATE notes SET title_plain=?, protected=0, updated_at=?, size_padded=?, idle_timeout=? WHERE id=?')
+    .run(title, now(), Buffer.byteLength(contentHtml || ''), idleTimeout || 60, note.id)
   const blob = { alg: 'PLAIN', data: contentHtml || '' }
   db.prepare('UPDATE note_blobs SET blob_encrypted=? WHERE note_id=? AND chunk_index=0')
     .run(Buffer.from(JSON.stringify(blob)), note.id)
@@ -576,7 +778,7 @@ app.get('/notes/:id', auth, (req, res) => {
   if (!note) return res.status(404).json({ error: 'not_found' })
   const blob = db.prepare('SELECT blob_encrypted FROM note_blobs WHERE note_id=? ORDER BY chunk_index ASC').get(note.id)
   const content = JSON.parse(blob.blob_encrypted.toString())
-  res.json({ id: note.id, protected: note.protected, noteSalt: note.note_salt || null, titlePlain: note.title_plain || null, noteKeyEnvelope: note.note_key_envelope ? JSON.parse(note.note_key_envelope) : null, titleEnc: note.title_encrypted ? JSON.parse(note.title_encrypted) : null, contentEnc: content, shared: note.shared || 0, sharePermission: note.share_permission || null, updatedAt: note.updated_at })
+  res.json({ id: note.id, protected: note.protected, noteSalt: note.note_salt || null, titlePlain: note.title_plain || null, noteKeyEnvelope: note.note_key_envelope ? JSON.parse(note.note_key_envelope) : null, titleEnc: note.title_encrypted ? JSON.parse(note.title_encrypted) : null, contentEnc: content, shared: note.shared || 0, sharePermission: note.share_permission || null, idleTimeout: note.idle_timeout || 60, updatedAt: note.updated_at })
 })
 
 app.post('/search/index', auth, (req, res) => {

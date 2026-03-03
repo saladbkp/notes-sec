@@ -173,3 +173,9 @@ rmb email password
 fypaper2026@gmail.com
 asdfghjkl;'
 done
+
+2/3
+email with evidence pic 
+3 times lock then 1 hour lock, if want continue email otp 6 pin /
+1 min cursor not move then lock  /
+

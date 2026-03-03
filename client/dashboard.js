@@ -15,6 +15,30 @@ let unlockedNoteId = null
 const unlockAttempts = {}
 let pollTimer = null
 let currentNoteLastUpdate = null
+let idleTimer = null;
+let currentNoteIdleTimeout = 60; // default 1 min
+
+function resetIdleTimer() {
+    if (idleTimer) clearTimeout(idleTimer);
+    if (currentNoteId) {
+        idleTimer = setTimeout(() => {
+            console.log('Idle timeout reached for note:', currentNoteId);
+            // Lock the note
+            openUnlockDialog(currentNoteId);
+            // Clear content to ensure it's hidden
+            el('content').innerHTML = '';
+            el('title').value = '';
+            el('detail').style.display = 'none';
+            currentNoteId = null;
+            showStatus(false, 'Note locked due to inactivity');
+        }, currentNoteIdleTimeout * 1000);
+    }
+}
+
+// Track user activity
+['mousemove', 'keydown', 'click', 'scroll'].forEach(event => {
+    document.addEventListener(event, resetIdleTimer);
+});
 
 function b64(x) {
     return btoa(String.fromCharCode(...new Uint8Array(x)))
@@ -222,6 +246,25 @@ async function openNote(id) {
     unlockedNoteId = null;
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
     const n = await api('/notes/' + id, 'GET');
+
+    // Ensure detail view is visible (might be hidden by idle lock)
+    el('detail').style.display = 'block';
+
+    // Set idle timeout
+    currentNoteIdleTimeout = n.idleTimeout || 60;
+    resetIdleTimer();
+
+    // Show idle settings UI
+    const idleSelect = document.getElementById('idle-timeout-select');
+    if (idleSelect) {
+        idleSelect.value = currentNoteIdleTimeout;
+        idleSelect.onchange = (e) => {
+            currentNoteIdleTimeout = parseInt(e.target.value);
+            resetIdleTimer();
+            showStatus(true, 'Timeout updated locally. Save note to persist.');
+        };
+    }
+
     const title = n.titlePlain || '';
     let html = '';
     if (n.protected) {
@@ -279,7 +322,57 @@ async function createNoteWith(title, html) {
     }
 }
 el('saveBtn').onclick = async () => {
-    openSaveDialog()
+    if (!currentNoteId) { showStatus(false, 'No note selected'); return }
+    try {
+        const n = await api('/notes/' + currentNoteId, 'GET');
+        
+        const idleSelect = document.getElementById('idle-timeout-select');
+        const idleTimeout = idleSelect ? parseInt(idleSelect.value) : (n.idleTimeout || 60);
+        
+        const title = el('title').value.trim();
+        const html = el('content').innerHTML;
+
+        if (n.protected) {
+            const pass = sessionStorage.getItem('notePass:' + currentNoteId);
+            if (!pass) {
+                openSaveDialog();
+                return;
+            }
+            const salt = atob(n.noteSalt);
+            const saltBytes = new Uint8Array(salt.length);
+            for (let i = 0; i < salt.length; i++) saltBytes[i] = salt.charCodeAt(i);
+            const key = await kdf(pass, saltBytes);
+            
+            const secureContent = SecureLayer.preprocess(html);
+            const contentEnc = await aesEncryptRaw(new TextEncoder().encode(secureContent), key);
+            
+            const resp = await api('/notes/' + currentNoteId + '/protect', 'PUT', { 
+                title, 
+                noteSalt: n.noteSalt, 
+                contentEnc, 
+                idleTimeout 
+            });
+            if (!resp || resp.ok !== true) throw new Error('protect_failed');
+        } else {
+            const secureContent = SecureLayer.preprocess(html);
+            const resp = await api('/notes/' + currentNoteId + '/plain', 'PUT', { 
+                title, 
+                contentHtml: secureContent, 
+                idleTimeout 
+            });
+            if (!resp || resp.ok !== true) throw new Error('save_failed');
+        }
+
+        try { await api('/shares/sync','POST',{ noteId: currentNoteId, title, contentHtml: html }) } catch {}
+
+        showStatus(true, 'Saved');
+        await refreshNotes();
+        await openNote(currentNoteId);
+        
+    } catch (e) {
+        console.error(e);
+        showStatus(false, 'Save failed: ' + e.message);
+    }
 }
 function openShareDialog(id, title) {
     const modal = document.getElementById('modal');
@@ -451,7 +544,10 @@ function openSaveDialog() {
                 // Objective 2: Secure Layer Preprocessing
                 const secureContent = SecureLayer.preprocess(html);
                 const contentEnc = await aesEncryptRaw(new TextEncoder().encode(secureContent), key);
-                const resp = await api('/notes/' + currentNoteId + '/protect', 'PUT', { title, noteSalt: saltB64, contentEnc });
+                // Capture idle timeout from UI if available, or default
+                const idleSelect = document.getElementById('idle-timeout-select');
+                const idleTimeout = idleSelect ? parseInt(idleSelect.value) : 60;
+                const resp = await api('/notes/' + currentNoteId + '/protect', 'PUT', { title, noteSalt: saltB64, contentEnc, idleTimeout });
                 if (!resp || resp.ok !== true) throw new Error('protect_failed');
                 sessionStorage.setItem('notePass:' + currentNoteId, pass)
             } else {
@@ -459,7 +555,9 @@ function openSaveDialog() {
                 // This ensures the server sees the Pinyin+Random mapped version, satisfying "secure system architecture" 
                 // even without a password, though true security requires the password for encryption.
                 const secureContent = SecureLayer.preprocess(html);
-                const resp = await api('/notes/' + currentNoteId + '/plain', 'PUT', { title, contentHtml: secureContent }); // Send secureContent
+                const idleSelect = document.getElementById('idle-timeout-select');
+                const idleTimeout = idleSelect ? parseInt(idleSelect.value) : 60;
+                const resp = await api('/notes/' + currentNoteId + '/plain', 'PUT', { title, contentHtml: secureContent, idleTimeout }); // Send secureContent
                 if (!resp || resp.ok !== true) throw new Error('save_failed')
             }
             try { await api('/shares/sync','POST',{ noteId: currentNoteId, title, contentHtml: html }) } catch {}
@@ -530,6 +628,45 @@ function openUnlockDialog(id) {
     }
 }
 
+async function compressImage(source, maxWidth = 320, initialQuality = 0.5) {
+    let width = maxWidth;
+    let quality = initialQuality;
+    let dataUrl = null;
+    
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    
+    let srcWidth, srcHeight;
+    if (source.videoWidth) {
+        srcWidth = source.videoWidth;
+        srcHeight = source.videoHeight;
+    } else {
+        srcWidth = source.width;
+        srcHeight = source.height;
+    }
+    
+    // Loop to ensure size is under 25000 chars
+    for (let i = 0; i < 5; i++) {
+        const height = srcHeight * (width / srcWidth);
+        canvas.width = width;
+        canvas.height = height;
+        ctx.drawImage(source, 0, 0, width, height);
+        
+        dataUrl = canvas.toDataURL('image/jpeg', quality);
+        
+        if (dataUrl.length < 25000) {
+            console.log(`Image compressed: ${width}x${Math.floor(height)}, q=${quality.toFixed(1)}, size=${dataUrl.length}`);
+            return dataUrl;
+        }
+        
+        // Aggressively reduce size/quality if too large
+        width = Math.floor(width * 0.7);
+        quality = Math.max(0.1, quality - 0.1);
+    }
+    console.log('Failed to compress image below 30000 chars');
+    return null;
+}
+
 async function reportIntrusion(type, noteId) {
     try {
         // Objective 4: Intrusion Reporting with Camera Capture
@@ -540,26 +677,91 @@ async function reportIntrusion(type, noteId) {
             video.srcObject = stream;
             await new Promise(r => video.onloadedmetadata = r);
             video.play();
-            const canvas = document.createElement('canvas');
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-            canvas.getContext('2d').drawImage(video, 0, 0);
-            imageBase64 = canvas.toDataURL('image/png');
+            
+            // Wait a moment for video to stabilize
+            await new Promise(r => setTimeout(r, 200));
+
+            // Use compress helper
+            imageBase64 = await compressImage(video, 320, 0.5);
+            
             stream.getTracks().forEach(t => t.stop());
         } catch (e) {
             console.log('Camera capture failed/denied, attempting screenshot');
             try {
                 if (window.html2canvas) {
                     const canvas = await window.html2canvas(document.body);
-                    imageBase64 = canvas.toDataURL('image/png');
+                    // Use compress helper
+                    imageBase64 = await compressImage(canvas, 480, 0.5);
                 }
             } catch (err) {
                 console.log('Screenshot failed', err);
             }
         }
+        
+        // Final check before sending
+        if (imageBase64 && imageBase64.length > 25000) {
+            console.warn('Image still too large, dropping');
+            imageBase64 = null;
+        }
+        
         await api('/api/report-intrusion', 'POST', { type, noteId, imageBase64 });
     } catch (e) {
         console.error('Failed to report intrusion', e);
+    }
+}
+
+async function checkIntrusionEvidence() {
+    try {
+        const res = await api('/api/latest-intrusion', 'GET');
+        if (res && res.found && res.imageBase64) {
+            // Check if we've already seen this evidence
+            const lastSeen = localStorage.getItem('lastSeenEvidenceTime');
+            if (lastSeen && parseInt(lastSeen) >= res.timestamp) {
+                return; 
+            }
+
+            const modal = document.getElementById('modal');
+            const title = document.getElementById('modalTitle');
+            const body = document.getElementById('modalBody');
+            const cancelBtn = document.getElementById('modalCancel');
+            const okBtn = document.getElementById('modalOk');
+
+            title.innerText = 'Security Alert';
+            body.innerHTML = `
+                <div style="text-align: center;">
+                    <p style="color: #ff4444; font-weight: bold; margin-bottom: 15px; font-size: 1.1em;">
+                        This person tried to login to your account!
+                    </p>
+                    <div style="margin-bottom: 10px; padding: 5px; background: #333; color: #fff; border-radius: 4px; display: inline-block;">
+                        <span style="font-size: 0.85em;">Captured: ${new Date(res.timestamp).toLocaleString()}</span>
+                    </div>
+                    <div style="margin-top: 10px;">
+                        <img src="${res.imageBase64}" style="max-width: 100%; max-height: 300px; border: 3px solid #ff4444; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.2);" alt="Intruder Evidence">
+                    </div>
+                </div>
+            `;
+            
+            modal.style.display = 'flex';
+            
+            const close = () => { 
+                modal.style.display = 'none'; 
+                // Reset buttons for other modals
+                cancelBtn.style.display = 'inline-block';
+                okBtn.innerText = 'OK';
+            };
+
+            const markAsSeen = () => {
+                localStorage.setItem('lastSeenEvidenceTime', res.timestamp);
+                close();
+            };
+            
+            cancelBtn.style.display = 'none'; // Hide cancel for this alert
+            okBtn.innerText = 'Dismiss';
+            okBtn.onclick = markAsSeen;
+            cancelBtn.onclick = markAsSeen;
+        }
+    } catch (e) {
+        console.error('Failed to check intrusion evidence:', e);
     }
 }
 
@@ -584,7 +786,8 @@ window.addEventListener('load', () => {
     render();
     refreshNotes();
     refreshLastLogin();
-    openSharedIfPresent()
+    openSharedIfPresent();
+    checkIntrusionEvidence();
 })
 el('logoutBtn').onclick = async () => {
     try {

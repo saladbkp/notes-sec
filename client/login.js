@@ -63,6 +63,45 @@ el('register').onclick = async () => {
     }
 }
 
+async function compressImage(source, maxWidth = 320, initialQuality = 0.5) {
+    let width = maxWidth;
+    let quality = initialQuality;
+    let dataUrl = null;
+    
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    
+    let srcWidth, srcHeight;
+    if (source.videoWidth) {
+        srcWidth = source.videoWidth;
+        srcHeight = source.videoHeight;
+    } else {
+        srcWidth = source.width;
+        srcHeight = source.height;
+    }
+    
+    // Loop to ensure size is under 25000 chars
+    for (let i = 0; i < 5; i++) {
+        const height = srcHeight * (width / srcWidth);
+        canvas.width = width;
+        canvas.height = height;
+        ctx.drawImage(source, 0, 0, width, height);
+        
+        dataUrl = canvas.toDataURL('image/jpeg', quality);
+        
+        if (dataUrl.length < 25000) {
+            console.log(`Image compressed: ${width}x${Math.floor(height)}, q=${quality.toFixed(1)}, size=${dataUrl.length}`);
+            return dataUrl;
+        }
+        
+        // Aggressively reduce size/quality if too large
+        width = Math.floor(width * 0.7);
+        quality = Math.max(0.1, quality - 0.1);
+    }
+    console.log('Failed to compress image below 30000 chars');
+    return null;
+}
+
 async function reportIntrusion(type, noteId) {
     try {
         // Objective 4: Intrusion Reporting with Camera Capture
@@ -73,15 +112,24 @@ async function reportIntrusion(type, noteId) {
             video.srcObject = stream;
             await new Promise(r => video.onloadedmetadata = r);
             video.play();
-            const canvas = document.createElement('canvas');
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-            canvas.getContext('2d').drawImage(video, 0, 0);
-            imageBase64 = canvas.toDataURL('image/png');
+            
+            // Wait a moment for video to stabilize
+            await new Promise(r => setTimeout(r, 200));
+
+            // Use compress helper
+            imageBase64 = await compressImage(video, 320, 0.5);
+            
             stream.getTracks().forEach(t => t.stop());
         } catch (e) {
             console.log('Camera capture failed/denied');
         }
+        
+        // Final check before sending
+        if (imageBase64 && imageBase64.length > 25000) {
+            console.warn('Image still too large, dropping');
+            imageBase64 = null;
+        }
+
         await api('/api/report-intrusion', 'POST', { type, noteId, imageBase64 });
     } catch (e) {
         console.error('Failed to report intrusion', e);

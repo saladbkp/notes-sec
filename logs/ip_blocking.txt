@@ -5,3 +5,16 @@
 [2026-01-06T16:27:34.903Z] [IP_BLOCKED_THRESHOLD_EXCEEDED] IP: ::1 Details: {"attempts":3,"window":"5s","blockedUntil":"2026-01-06T16:42:34.902Z"}
 [2026-01-06T16:28:13.471Z] [IP_BLOCKED_THRESHOLD_EXCEEDED] IP: ::1 Details: {"attempts":3,"window":"5s","blockedUntil":"2026-01-06T16:43:13.470Z"}
 [2026-01-06T16:29:18.831Z] [IP_BLOCKED_THRESHOLD_EXCEEDED] IP: ::1 Details: {"attempts":3,"window":"5s","blockedUntil":"2026-01-06T16:44:18.830Z"}
+[2026-03-02T14:56:27.305Z] [IP_BLOCKED_THRESHOLD_EXCEEDED] IP: ::1 Details: {"attempts":3,"window":"5s","blockedUntil":"2026-03-02T15:56:27.305Z"}
+[2026-03-02T14:59:37.208Z] [IP_BLOCKED_THRESHOLD_EXCEEDED] IP: ::1 Details: {"attempts":3,"window":"5s","blockedUntil":"2026-03-02T15:59:37.208Z"}
+[2026-03-02T15:05:44.957Z] [IP_BLOCKED_THRESHOLD_EXCEEDED] IP: ::1 Details: {"attempts":3,"window":"5s","blockedUntil":"2026-03-02T16:05:44.956Z"}
+[2026-03-02T15:14:46.789Z] [IP_BLOCKED_THRESHOLD_EXCEEDED] IP: ::1 Details: {"attempts":3,"window":"5s","blockedUntil":"2026-03-02T16:14:46.789Z"}
+[2026-03-02T15:15:51.290Z] [IP_BLOCKED_THRESHOLD_EXCEEDED] IP: ::1 Details: {"attempts":3,"window":"5s","blockedUntil":"2026-03-02T16:15:51.289Z"}
+[2026-03-02T15:24:26.753Z] [IP_BLOCKED_THRESHOLD_EXCEEDED] IP: ::1 Details: {"attempts":3,"window":"5s","blockedUntil":"2026-03-02T16:24:26.752Z"}
+[2026-03-02T15:33:32.648Z] [IP_BLOCKED_THRESHOLD_EXCEEDED] IP: ::1 Details: {"attempts":3,"window":"5s","blockedUntil":"2026-03-02T16:33:32.647Z"}
+[2026-03-02T15:51:59.880Z] [IP_BLOCKED_THRESHOLD_EXCEEDED] IP: ::1 Details: {"attempts":3,"window":"5s","blockedUntil":"2026-03-02T16:51:59.879Z"}
+[2026-03-02T16:06:07.360Z] [IP_BLOCKED_THRESHOLD_EXCEEDED] IP: ::1 Details: {"attempts":3,"window":"5s","blockedUntil":"2026-03-02T17:06:07.360Z"}
+[2026-03-02T16:10:27.580Z] [IP_BLOCKED_THRESHOLD_EXCEEDED] IP: ::1 Details: {"attempts":3,"window":"5s","blockedUntil":"2026-03-02T17:10:27.579Z"}
+[2026-03-03T03:26:54.426Z] [IP_BLOCKED_THRESHOLD_EXCEEDED] IP: ::1 Details: {"attempts":3,"window":"5s","blockedUntil":"2026-03-03T04:26:54.425Z"}
+[2026-03-03T03:43:20.917Z] [IP_BLOCKED_THRESHOLD_EXCEEDED] IP: ::1 Details: {"attempts":3,"window":"5s","blockedUntil":"2026-03-03T04:43:20.917Z"}
+[2026-03-03T03:47:26.261Z] [IP_BLOCKED_THRESHOLD_EXCEEDED] IP: ::1 Details: {"attempts":3,"window":"5s","blockedUntil":"2026-03-03T04:47:26.261Z"}
