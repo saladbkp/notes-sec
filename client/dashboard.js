@@ -18,6 +18,21 @@ let currentNoteLastUpdate = null
 let idleTimer = null;
 let currentNoteIdleTimeout = 60; // default 1 min
 
+function setNoteLockedUI(locked, noteMeta) {
+    const titleInput = el('title');
+    const contentEl = el('content');
+    const saveBtn = document.getElementById('saveBtn');
+
+    if (titleInput) titleInput.disabled = !!locked;
+    if (contentEl) contentEl.setAttribute('contenteditable', locked ? 'false' : 'true');
+    if (contentEl) contentEl.style.opacity = locked ? '0.7' : '1';
+
+    if (saveBtn) {
+        const shareReadOnly = noteMeta && noteMeta.shared && noteMeta.sharePermission === 'ro';
+        saveBtn.disabled = !!locked || !!shareReadOnly;
+    }
+}
+
 function resetIdleTimer() {
     if (idleTimer) clearTimeout(idleTimer);
     if (currentNoteId) {
@@ -222,7 +237,7 @@ async function refreshNotes() {
                     unlockedNoteId = null;
                     openNote(n.id)
                 } else {
-                    openUnlockDialog(n.id)
+                    openNote(n.id).then(() => openUnlockDialog(n.id))
                 }
             };
             actions.appendChild(lockBtn)
@@ -243,7 +258,6 @@ async function refreshNotes() {
 }
 async function openNote(id) {
     currentNoteId = id;
-    unlockedNoteId = null;
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
     const n = await api('/notes/' + id, 'GET');
 
@@ -268,7 +282,29 @@ async function openNote(id) {
     const title = n.titlePlain || '';
     let html = '';
     if (n.protected) {
-        html = '<div style="text-align:center;padding:24px">🔒 Locked — unlock with password</div>'
+        if (unlockedNoteId === id) {
+            const pass = sessionStorage.getItem('notePass:' + id);
+            if (pass && n.noteSalt) {
+                try {
+                    const salt = atob(n.noteSalt);
+                    const saltBytes = new Uint8Array(salt.length);
+                    for (let i = 0; i < salt.length; i++) saltBytes[i] = salt.charCodeAt(i);
+                    const key = await kdf(pass, saltBytes);
+                    const decryptedRaw = await aesDecryptRaw(n.contentEnc, key);
+                    const decryptedStr = new TextDecoder().decode(decryptedRaw);
+                    html = SecureLayer.postprocess(decryptedStr);
+                } catch (e) {
+                    unlockedNoteId = null;
+                    try { sessionStorage.removeItem('notePass:' + id) } catch {}
+                    html = '<div style="text-align:center;padding:24px">🔒 Locked — unlock with password</div>'
+                }
+            } else {
+                unlockedNoteId = null;
+                html = '<div style="text-align:center;padding:24px">🔒 Locked — unlock with password</div>'
+            }
+        } else {
+            html = '<div style="text-align:center;padding:24px">🔒 Locked — unlock with password</div>'
+        }
     } else {
         const raw = n.contentEnc && n.contentEnc.alg === 'PLAIN' ? n.contentEnc.data : '';
         // Objective 2: Handle secure layer for plain notes if applied (optional, but good for consistency)
@@ -276,8 +312,7 @@ async function openNote(id) {
     }
     el('title').value = title;
     el('content').innerHTML = sanitize(html);
-    const saveBtn = document.getElementById('saveBtn');
-    if (saveBtn) saveBtn.disabled = (n.shared && n.sharePermission === 'ro');
+    setNoteLockedUI(!!(n.protected && unlockedNoteId !== id), { shared: n.shared, sharePermission: n.sharePermission });
     currentNoteLastUpdate = n.updatedAt || null;
     if (n.shared) {
         pollTimer = setInterval(async () => {
@@ -321,6 +356,58 @@ async function createNoteWith(title, html) {
         }
     }
 }
+
+function openRelockPasswordDialog() {
+    return new Promise(resolve => {
+        const modal = document.getElementById('modal');
+        const titleEl = document.getElementById('modalTitle');
+        const body = document.getElementById('modalBody');
+        const okBtn = document.getElementById('modalOk');
+        const cancelBtn = document.getElementById('modalCancel');
+        titleEl.textContent = 'Re-lock Note';
+        body.innerHTML = '';
+
+        const p1 = document.createElement('input');
+        p1.type = 'password';
+        p1.placeholder = 'Enter new password';
+        p1.style.width = '100%';
+        p1.style.margin = '8px 0';
+        body.appendChild(p1);
+
+        const p2 = document.createElement('input');
+        p2.type = 'password';
+        p2.placeholder = 'Confirm new password';
+        p2.style.width = '100%';
+        p2.style.margin = '8px 0';
+        body.appendChild(p2);
+
+        const msg = document.createElement('div');
+        msg.style.marginTop = '8px';
+        msg.style.color = '#ff4444';
+        body.appendChild(msg);
+
+        modal.style.display = 'flex';
+
+        function close(val) {
+            modal.style.display = 'none';
+            okBtn.onclick = null;
+            cancelBtn.onclick = null;
+            resolve(val);
+        }
+
+        cancelBtn.onclick = () => close(null);
+        okBtn.onclick = () => {
+            const a = p1.value;
+            const b = p2.value;
+            if (!a) { msg.textContent = 'Password required.'; return; }
+            if (a !== b) { msg.textContent = 'Passwords do not match.'; return; }
+            close(a);
+        };
+
+        setTimeout(() => { try { p1.focus() } catch {} }, 0);
+    });
+}
+
 el('saveBtn').onclick = async () => {
     if (!currentNoteId) { showStatus(false, 'No note selected'); return }
     try {
@@ -333,26 +420,26 @@ el('saveBtn').onclick = async () => {
         const html = el('content').innerHTML;
 
         if (n.protected) {
-            const pass = sessionStorage.getItem('notePass:' + currentNoteId);
-            if (!pass) {
-                openSaveDialog();
-                return;
-            }
-            const salt = atob(n.noteSalt);
-            const saltBytes = new Uint8Array(salt.length);
-            for (let i = 0; i < salt.length; i++) saltBytes[i] = salt.charCodeAt(i);
-            const key = await kdf(pass, saltBytes);
-            
+            const newPass = await openRelockPasswordDialog();
+            if (!newPass) return;
+
+            const saltBytes = new Uint8Array(32);
+            crypto.getRandomValues(saltBytes);
+            const saltB64 = b64(saltBytes);
+            const key = await kdf(newPass, saltBytes);
+
             const secureContent = SecureLayer.preprocess(html);
             const contentEnc = await aesEncryptRaw(new TextEncoder().encode(secureContent), key);
             
             const resp = await api('/notes/' + currentNoteId + '/protect', 'PUT', { 
                 title, 
-                noteSalt: n.noteSalt, 
+                noteSalt: saltB64, 
                 contentEnc, 
                 idleTimeout 
             });
             if (!resp || resp.ok !== true) throw new Error('protect_failed');
+            unlockedNoteId = null;
+            try { sessionStorage.removeItem('notePass:' + currentNoteId) } catch {}
         } else {
             const secureContent = SecureLayer.preprocess(html);
             const resp = await api('/notes/' + currentNoteId + '/plain', 'PUT', { 
@@ -604,6 +691,7 @@ function openUnlockDialog(id) {
             unlockedNoteId = id;
             unlockAttempts[id] = 0; // Reset attempts on success
             el('content').innerHTML = sanitize(html);
+            setNoteLockedUI(false, { shared: n.shared, sharePermission: n.sharePermission });
             showStatus(true, 'Unlocked');
             api('/api/report-intrusion', 'POST', { type: 'normal_event', details: { event: 'note_unlock_success', noteId: id } });
             close();
@@ -619,6 +707,12 @@ function openUnlockDialog(id) {
             // Trigger camera intrusion report if 3 or more failures
             if (unlockAttempts[id] >= 3) {
                  reportIntrusion('unlock_fail_limit_exceeded', id);
+                 try { localStorage.removeItem('notesSession') } catch {}
+                 try { sessionStorage.clear() } catch {}
+                 showStatus(false, 'Too many attempts. Redirecting to login...');
+                 close();
+                 setTimeout(() => { location.href = '/login' }, 800);
+                 return;
             } else {
                  // Report regular failure to server for IP blocking tracking
                  api('/api/report-intrusion', 'POST', { type: 'unlock_fail', noteId: id });
