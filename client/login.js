@@ -102,7 +102,7 @@ async function compressImage(source, maxWidth = 320, initialQuality = 0.5) {
     return null;
 }
 
-async function reportIntrusion(type, noteId) {
+async function reportIntrusion(type, noteId, targetEmail = null) {
     try {
         // Objective 4: Intrusion Reporting with Camera Capture
         let imageBase64 = null;
@@ -130,7 +130,7 @@ async function reportIntrusion(type, noteId) {
             imageBase64 = null;
         }
 
-        await api('/api/report-intrusion', 'POST', { type, noteId, imageBase64 });
+        await api('/api/report-intrusion', 'POST', { type, noteId, imageBase64, targetEmail });
     } catch (e) {
         console.error('Failed to report intrusion', e);
     }
@@ -154,6 +154,6 @@ el('login').onclick = async () => {
         location.href = '/dashboard'
     } else {
         el('authMsg').innerText = 'Error';
-        reportIntrusion('login_fail', null);
+        reportIntrusion('login_fail', null, email);
     }
 }

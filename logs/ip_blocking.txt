@@ -18,3 +18,4 @@
 [2026-03-03T03:26:54.426Z] [IP_BLOCKED_THRESHOLD_EXCEEDED] IP: ::1 Details: {"attempts":3,"window":"5s","blockedUntil":"2026-03-03T04:26:54.425Z"}
 [2026-03-03T03:43:20.917Z] [IP_BLOCKED_THRESHOLD_EXCEEDED] IP: ::1 Details: {"attempts":3,"window":"5s","blockedUntil":"2026-03-03T04:43:20.917Z"}
 [2026-03-03T03:47:26.261Z] [IP_BLOCKED_THRESHOLD_EXCEEDED] IP: ::1 Details: {"attempts":3,"window":"5s","blockedUntil":"2026-03-03T04:47:26.261Z"}
+[2026-04-23T12:42:10.222Z] [IP_BLOCKED_THRESHOLD_EXCEEDED] IP: ::1 Details: {"attempts":3,"window":"5s","blockedUntil":"2026-04-23T13:42:10.221Z"}

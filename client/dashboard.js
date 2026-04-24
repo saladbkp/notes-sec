@@ -16,36 +16,160 @@ const unlockAttempts = {}
 let pollTimer = null
 let currentNoteLastUpdate = null
 let idleTimer = null;
-let currentNoteIdleTimeout = 60; // default 1 min
+const DEFAULT_IDLE_TIMEOUT = 10;
+let currentNoteIdleTimeout = DEFAULT_IDLE_TIMEOUT;
+let sessionLocked = false;
+const sharedLocalUnlock = {}
+const lastSavedSigByNoteId = {}
 
 function setNoteLockedUI(locked, noteMeta) {
     const titleInput = el('title');
     const contentEl = el('content');
     const saveBtn = document.getElementById('saveBtn');
 
-    if (titleInput) titleInput.disabled = !!locked;
-    if (contentEl) contentEl.setAttribute('contenteditable', locked ? 'false' : 'true');
-    if (contentEl) contentEl.style.opacity = locked ? '0.7' : '1';
+    const shareReadOnly = !!(noteMeta && noteMeta.recipientReadOnly);
+    const readonly = !!locked || shareReadOnly;
+
+    if (titleInput) titleInput.disabled = readonly;
+    if (contentEl) contentEl.setAttribute('contenteditable', readonly ? 'false' : 'true');
+    if (contentEl) contentEl.style.opacity = readonly ? '0.7' : '1';
 
     if (saveBtn) {
-        const shareReadOnly = noteMeta && noteMeta.shared && noteMeta.sharePermission === 'ro';
-        saveBtn.disabled = !!locked || !!shareReadOnly;
+        saveBtn.disabled = readonly;
     }
+}
+
+function formatMmSs(totalSeconds) {
+    const s = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+    const mm = String(Math.floor(s / 60)).padStart(2, '0');
+    const ss = String(s % 60).padStart(2, '0');
+    return `${mm}:${ss}`;
+}
+
+function parseMmSs(input) {
+    const v = String(input || '').trim();
+    if (!v) return null;
+    const m = v.match(/^(\d{1,3}):([0-5]\d)$/);
+    if (!m) return null;
+    const mins = parseInt(m[1], 10);
+    const secs = parseInt(m[2], 10);
+    const total = mins * 60 + secs;
+    if (!Number.isFinite(total) || total <= 0) return null;
+    return total;
+}
+
+function setIdleTimeoutUI(seconds) {
+    const idleCustom = document.getElementById('idle-timeout-custom');
+    if (idleCustom) idleCustom.value = formatMmSs(seconds);
+}
+
+function getIdleTimeoutFromUI(fallbackSeconds = DEFAULT_IDLE_TIMEOUT) {
+    const idleCustom = document.getElementById('idle-timeout-custom');
+    const parsed = parseMmSs(idleCustom ? idleCustom.value : '');
+    return parsed || fallbackSeconds;
+}
+
+function openSessionUnlockDialog() {
+    return new Promise(resolve => {
+        const stored = sessionStorage.getItem('contentPass');
+        if (!stored) { resolve(false); return; }
+
+        const modal = document.getElementById('modal');
+        const titleEl = document.getElementById('modalTitle');
+        const body = document.getElementById('modalBody');
+        const okBtn = document.getElementById('modalOk');
+        const cancelBtn = document.getElementById('modalCancel');
+        titleEl.textContent = 'Session Locked';
+        body.innerHTML = '';
+
+        const p = document.createElement('input');
+        p.type = 'password';
+        p.placeholder = 'Enter account password';
+        p.style.width = '100%';
+        p.style.margin = '8px 0';
+        body.appendChild(p);
+
+        modal.style.display = 'flex';
+
+        function close(val) {
+            modal.style.display = 'none';
+            okBtn.onclick = null;
+            cancelBtn.onclick = null;
+            resolve(val);
+        }
+
+        cancelBtn.onclick = () => close(false);
+        okBtn.onclick = () => close(p.value === stored);
+        setTimeout(() => { try { p.focus() } catch {} }, 0);
+    });
+}
+
+function computeNoteSig(title, html) {
+    return String(title || '') + '\n' + String(html || '');
+}
+
+async function autoSaveCurrentNote() {
+    if (!currentNoteId) return false;
+    const id = currentNoteId;
+    const title = (el('title').value || '').trim();
+    const html = el('content').innerHTML || '';
+    const sig = computeNoteSig(title, html);
+    if (lastSavedSigByNoteId[id] === sig) return true;
+
+    const n = await api('/notes/' + id, 'GET');
+    if (!n) return false;
+    if (n.recipientReadOnly) return true;
+
+    const idleTimeout = getIdleTimeoutFromUI(n.idleTimeout || DEFAULT_IDLE_TIMEOUT);
+
+    if (n.protected) {
+        if (unlockedNoteId !== id) return false;
+        const pass = sessionStorage.getItem('notePass:' + id);
+        if (!pass || !n.noteSalt) return false;
+
+        const salt = atob(n.noteSalt);
+        const saltBytes = new Uint8Array(salt.length);
+        for (let i = 0; i < salt.length; i++) saltBytes[i] = salt.charCodeAt(i);
+        const key = await kdf(pass, saltBytes);
+
+        const secureContent = SecureLayer.preprocess(html);
+        const contentEnc = await aesEncryptRaw(new TextEncoder().encode(secureContent), key);
+        const resp = await api('/notes/' + id + '/protect', 'PUT', { title, noteSalt: n.noteSalt, contentEnc, idleTimeout });
+        if (!resp || resp.ok !== true) return false;
+    } else {
+        const secureContent = SecureLayer.preprocess(html);
+        const resp = await api('/notes/' + id + '/plain', 'PUT', { title, contentHtml: secureContent, idleTimeout });
+        if (!resp || resp.ok !== true) return false;
+    }
+
+    try { await api('/shares/sync', 'POST', { noteId: id, title, contentHtml: SecureLayer.preprocess(html) }) } catch {}
+
+    lastSavedSigByNoteId[id] = sig;
+    return true;
+}
+
+async function setSharedLocalLock(noteId, pass) {
+    const saltBytes = new Uint8Array(16);
+    crypto.getRandomValues(saltBytes);
+    const saltB64 = b64(saltBytes);
+    const enc = new TextEncoder();
+    const digest = await crypto.subtle.digest('SHA-256', enc.encode(pass + ':' + saltB64));
+    const hashB64 = b64(digest);
+    localStorage.setItem('sharedLock:' + noteId, JSON.stringify({ saltB64, hashB64 }));
 }
 
 function resetIdleTimer() {
     if (idleTimer) clearTimeout(idleTimer);
-    if (currentNoteId) {
-        idleTimer = setTimeout(() => {
-            console.log('Idle timeout reached for note:', currentNoteId);
-            // Lock the note
-            openUnlockDialog(currentNoteId);
-            // Clear content to ensure it's hidden
+    if (currentNoteId && !sessionLocked) {
+        idleTimer = setTimeout(async () => {
+            try { await autoSaveCurrentNote() } catch {}
+            sessionLocked = true;
             el('content').innerHTML = '';
             el('title').value = '';
             el('detail').style.display = 'none';
             currentNoteId = null;
             showStatus(false, 'Note locked due to inactivity');
+            setTimeout(() => { location.reload() }, 600);
         }, currentNoteIdleTimeout * 1000);
     }
 }
@@ -227,21 +351,50 @@ async function refreshNotes() {
             e.stopPropagation();
             deleteNote(n.id)
         };
+        const lockBtn = document.createElement('button');
         if (n.protected) {
-            const lockBtn = document.createElement('button');
             lockBtn.title = (unlockedNoteId === n.id) ? 'Relock' : 'Unlock';
             lockBtn.textContent = (unlockedNoteId === n.id) ? '🔓' : '🔒';
-            lockBtn.onclick = (e) => {
+            lockBtn.onclick = async (e) => {
                 e.stopPropagation();
                 if (unlockedNoteId === n.id) {
                     unlockedNoteId = null;
-                    openNote(n.id)
+                    await openNote(n.id)
                 } else {
-                    openNote(n.id).then(() => openUnlockDialog(n.id))
+                    const opened = await openNote(n.id);
+                    if (!opened) return;
+                    openUnlockDialog(n.id)
                 }
             };
-            actions.appendChild(lockBtn)
+        } else {
+            const localLock = n.shared ? localStorage.getItem('sharedLock:' + n.id) : null;
+            const localUnlocked = !!sharedLocalUnlock[n.id];
+            if (n.shared && localLock) {
+                lockBtn.title = localUnlocked ? 'Relock' : 'Unlock';
+                lockBtn.textContent = localUnlocked ? '🔓' : '🔒';
+                lockBtn.onclick = async (e) => {
+                    e.stopPropagation();
+                    if (localUnlocked) {
+                        sharedLocalUnlock[n.id] = false;
+                        await openNote(n.id)
+                    } else {
+                        const opened = await openNote(n.id);
+                        if (!opened) return;
+                        openUnlockDialog(n.id)
+                    }
+                };
+            } else {
+                lockBtn.title = n.shared ? 'Unlocked' : 'Lock';
+                lockBtn.textContent = n.shared ? '🔓' : '🔒';
+                lockBtn.onclick = async (e) => {
+                    e.stopPropagation();
+                    const opened = await openNote(n.id);
+                    if (!opened) return;
+                    await lockNoteWithOwnPassword(n.id)
+                };
+            }
         }
+        actions.appendChild(lockBtn)
         const sharedIcon = document.createElement('button');
         sharedIcon.title = n.shared ? (n.sharePermission==='rw'?'Shared: edit':'Shared: read-only') : 'Not shared';
         sharedIcon.textContent = n.shared ? '🔗' : '';
@@ -252,11 +405,17 @@ async function refreshNotes() {
         row.appendChild(left);
         row.appendChild(right);
         row.appendChild(actions);
-        row.onclick = () => openNote(n.id);
+        row.onclick = async () => { await openNote(n.id) };
         wrap.appendChild(row)
     }
 }
 async function openNote(id) {
+    if (sessionLocked) {
+        const ok = await openSessionUnlockDialog();
+        if (!ok) return false;
+        sessionLocked = false;
+        el('detail').style.display = 'block';
+    }
     currentNoteId = id;
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
     const n = await api('/notes/' + id, 'GET');
@@ -265,22 +424,39 @@ async function openNote(id) {
     el('detail').style.display = 'block';
 
     // Set idle timeout
-    currentNoteIdleTimeout = n.idleTimeout || 60;
+    currentNoteIdleTimeout = n.idleTimeout || DEFAULT_IDLE_TIMEOUT;
     resetIdleTimer();
 
     // Show idle settings UI
-    const idleSelect = document.getElementById('idle-timeout-select');
-    if (idleSelect) {
-        idleSelect.value = currentNoteIdleTimeout;
-        idleSelect.onchange = (e) => {
-            currentNoteIdleTimeout = parseInt(e.target.value);
+    const idleCustom = document.getElementById('idle-timeout-custom');
+    if (idleCustom) {
+        setIdleTimeoutUI(currentNoteIdleTimeout);
+        idleCustom.onchange = () => {
+            const parsed = parseMmSs(idleCustom.value);
+            if (!parsed) { showStatus(false, 'Invalid timeout. Use mm:ss (e.g. 00:30)'); return; }
+            currentNoteIdleTimeout = parsed;
             resetIdleTimer();
-            showStatus(true, 'Timeout updated locally. Save note to persist.');
+            api('/notes/' + id + '/idle-timeout', 'PUT', { idleTimeout: currentNoteIdleTimeout })
+                .then(() => showStatus(true, 'Timeout saved'))
+                .catch(() => showStatus(false, 'Timeout save failed'));
         };
     }
 
     const title = n.titlePlain || '';
     let html = '';
+    const localLockKey = 'sharedLock:' + id;
+    const hasLocalLock = !n.protected && n.shared && !!localStorage.getItem(localLockKey);
+    const localUnlocked = !!sharedLocalUnlock[id];
+
+    if (hasLocalLock && !localUnlocked) {
+        html = '<div style="text-align:center;padding:24px">🔒 Locked — unlock with password</div>'
+        el('title').value = title;
+        el('content').innerHTML = sanitize(html);
+        lastSavedSigByNoteId[id] = computeNoteSig(el('title').value, el('content').innerHTML);
+        setNoteLockedUI(true, { shared: n.shared, sharePermission: n.sharePermission, recipientReadOnly: n.recipientReadOnly });
+        await refreshNotes();
+        return true;
+    }
     if (n.protected) {
         if (unlockedNoteId === id) {
             const pass = sessionStorage.getItem('notePass:' + id);
@@ -307,14 +483,14 @@ async function openNote(id) {
         }
     } else {
         const raw = n.contentEnc && n.contentEnc.alg === 'PLAIN' ? n.contentEnc.data : '';
-        // Objective 2: Handle secure layer for plain notes if applied (optional, but good for consistency)
         html = SecureLayer.postprocess(raw);
     }
     el('title').value = title;
     el('content').innerHTML = sanitize(html);
-    setNoteLockedUI(!!(n.protected && unlockedNoteId !== id), { shared: n.shared, sharePermission: n.sharePermission });
+    lastSavedSigByNoteId[id] = computeNoteSig(el('title').value, el('content').innerHTML);
+    setNoteLockedUI(!!(n.protected && unlockedNoteId !== id), { shared: n.shared, sharePermission: n.sharePermission, recipientReadOnly: n.recipientReadOnly });
     currentNoteLastUpdate = n.updatedAt || null;
-    if (n.shared) {
+    if (n.shared && !n.protected) {
         pollTimer = setInterval(async () => {
             const m = await api('/notes/' + id, 'GET');
             if (m && m.updatedAt && m.updatedAt !== currentNoteLastUpdate) {
@@ -323,11 +499,13 @@ async function openNote(id) {
                 const newHtml = SecureLayer.postprocess(newHtmlRaw);
                 el('content').innerHTML = sanitize(newHtml);
                 el('title').value = m.titlePlain || '';
+                lastSavedSigByNoteId[id] = computeNoteSig(el('title').value, el('content').innerHTML);
                 showStatus(true, 'Updated from share', { small: true })
             }
         }, 3000)
     }
     await refreshNotes()
+    return true
 }
 async function createNoteWith(title, html) {
     const created = await api('/notes/plain', 'POST', {
@@ -355,6 +533,46 @@ async function createNoteWith(title, html) {
             await openNote(created.id)
         }
     }
+}
+
+async function lockNoteWithOwnPassword(noteId) {
+    if (!noteId) return;
+    if (currentNoteId !== noteId) {
+        await openNote(noteId);
+    }
+    const n = await api('/notes/' + noteId, 'GET');
+    if (n.protected) return;
+
+    const idleTimeout = getIdleTimeoutFromUI(n.idleTimeout || DEFAULT_IDLE_TIMEOUT);
+    const title = el('title').value.trim();
+    const html = el('content').innerHTML;
+
+    const pass = await openRelockPasswordDialog();
+    if (!pass) return;
+
+    if (n.shared) {
+        await setSharedLocalLock(noteId, pass);
+        sharedLocalUnlock[noteId] = true;
+        showStatus(true, 'Locked');
+        await refreshNotes();
+        await openNote(noteId);
+        return;
+    }
+
+    const saltBytes = new Uint8Array(32);
+    crypto.getRandomValues(saltBytes);
+    const saltB64 = b64(saltBytes);
+    const key = await kdf(pass, saltBytes);
+    const secureContent = SecureLayer.preprocess(html);
+    const contentEnc = await aesEncryptRaw(new TextEncoder().encode(secureContent), key);
+    const resp = await api('/notes/' + noteId + '/protect', 'PUT', { title, noteSalt: saltB64, contentEnc, idleTimeout });
+    if (!resp || resp.ok !== true) throw new Error('protect_failed');
+
+    unlockedNoteId = null;
+    try { sessionStorage.removeItem('notePass:' + noteId) } catch {}
+    showStatus(true, 'Locked');
+    await refreshNotes();
+    await openNote(noteId);
 }
 
 function openRelockPasswordDialog() {
@@ -412,12 +630,19 @@ el('saveBtn').onclick = async () => {
     if (!currentNoteId) { showStatus(false, 'No note selected'); return }
     try {
         const n = await api('/notes/' + currentNoteId, 'GET');
+        if (n && n.recipientReadOnly) { showStatus(false, 'Read-only shared note'); return }
+        const isEditableSharedNote = !!(n && n.shared && !n.protected && !n.recipientReadOnly);
         
-        const idleSelect = document.getElementById('idle-timeout-select');
-        const idleTimeout = idleSelect ? parseInt(idleSelect.value) : (n.idleTimeout || 60);
+        const idleTimeout = getIdleTimeoutFromUI(n.idleTimeout || DEFAULT_IDLE_TIMEOUT);
         
         const title = el('title').value.trim();
         const html = el('content').innerHTML;
+        let sharedPass = null;
+
+        if (isEditableSharedNote) {
+            sharedPass = await openRelockPasswordDialog();
+            if (!sharedPass) return;
+        }
 
         if (n.protected) {
             const newPass = await openRelockPasswordDialog();
@@ -450,7 +675,13 @@ el('saveBtn').onclick = async () => {
             if (!resp || resp.ok !== true) throw new Error('save_failed');
         }
 
-        try { await api('/shares/sync','POST',{ noteId: currentNoteId, title, contentHtml: html }) } catch {}
+        if (isEditableSharedNote) {
+            await setSharedLocalLock(currentNoteId, sharedPass);
+            sharedLocalUnlock[currentNoteId] = false;
+        }
+
+        // Always sync shared content, regardless of local protection
+        try { await api('/shares/sync','POST',{ noteId: currentNoteId, title, contentHtml: SecureLayer.preprocess(html) }) } catch {}
 
         showStatus(true, 'Saved');
         await refreshNotes();
@@ -499,10 +730,14 @@ function openShareDialog(id, title) {
             const nkEnvelopeForLinkSecure = await aesEncryptRaw(new TextEncoder().encode(securePayload), sk);
             
             const resp = await api('/shares', 'POST', { noteId: id, recipientEmail: email, nkEnvelopeForLink: nkEnvelopeForLinkSecure, permission: perm.value });
-            if (resp && resp.token) {
+            if (resp && resp.status === 'created' && resp.token) {
                 const keyB64 = b64(sk);
                 const link = window.location.origin + '/dashboard?share=' + resp.token + '#key=' + keyB64;
                 showStatus(true, 'Shared: ' + link, { persist: true, small: true, copyText: link });
+            } else if (resp && resp.status === 'same_permission') {
+                showStatus(false, 'Already shared with same permission', { persist: true, small: true });
+            } else if (resp && resp.status === 'permission_updated') {
+                showStatus(true, 'Updated share permission', { persist: true, small: true });
             } else {
                 showStatus(false, 'Share failed');
             }
@@ -517,6 +752,8 @@ async function deleteNote(id) {
     if (!confirm('Delete this note?')) return;
     const resp = await api('/notes/' + id, 'DELETE');
     if (resp && resp.ok) {
+        try { localStorage.removeItem('sharedLock:' + id) } catch {}
+        delete sharedLocalUnlock[id];
         if (id === currentNoteId) {
             currentNoteId = null;
             el('title').value = '';
@@ -538,7 +775,8 @@ function showStatus(ok, msg, opts) {
 
 function getParam(name){const m=location.search.match(new RegExp('[?&]'+name+'=([^&]+)'));return m?decodeURIComponent(m[1]):null}
 function getKeyFromHash(){const m=location.hash.match(/key=([^&]+)/);return m?m[1]:null}
-async function openSharedIfPresent(){const token=getParam('share');const keyB64=getKeyFromHash();if(!token||!keyB64)return;try{const payload=await api('/shares/'+token,'GET');if(payload&&payload.nkEnvelopeForLink){const sk=ub64(keyB64);const decryptedRaw=await aesDecryptRaw(payload.nkEnvelopeForLink,sk);const decryptedStr=new TextDecoder().decode(decryptedRaw);const html=SecureLayer.postprocess(decryptedStr);const title=payload.titlePlain||'Shared';const created=await api('/notes/plain','POST',{title,contentHtml:html});if(created&&created.id){await api('/shares/'+token+'/accept','POST',{noteId:created.id});await refreshNotes();await openNote(created.id);showStatus(true,'Added shared note',{small:true})}}}catch(e){showStatus(false,'Open share failed',{small:true})}}
+function clearShareParamsFromUrl(){try{history.replaceState(null,'',window.location.pathname)}catch{}}
+async function openSharedIfPresent(){const token=getParam('share');const keyB64=getKeyFromHash();if(!token||!keyB64)return;try{const payload=await api('/shares/'+token,'GET');if(payload&&payload.accepted&&payload.acceptedNoteId){clearShareParamsFromUrl();await refreshNotes();await openNote(payload.acceptedNoteId);return}if(payload&&payload.nkEnvelopeForLink){const sk=ub64(keyB64);const decryptedRaw=await aesDecryptRaw(payload.nkEnvelopeForLink,sk);const decryptedStr=new TextDecoder().decode(decryptedRaw);const html=SecureLayer.postprocess(decryptedStr);const title=payload.titlePlain||'Shared';const created=await api('/notes/plain','POST',{title,contentHtml:html});if(created&&created.id){await api('/shares/'+token+'/accept','POST',{noteId:created.id});clearShareParamsFromUrl();await refreshNotes();await openNote(created.id);showStatus(true,'Added shared note',{small:true})}}}catch(e){showStatus(false,'Open share failed',{small:true})}}
 
 function openCreateDialog() {
     const modal = document.getElementById('modal');
@@ -632,8 +870,7 @@ function openSaveDialog() {
                 const secureContent = SecureLayer.preprocess(html);
                 const contentEnc = await aesEncryptRaw(new TextEncoder().encode(secureContent), key);
                 // Capture idle timeout from UI if available, or default
-                const idleSelect = document.getElementById('idle-timeout-select');
-                const idleTimeout = idleSelect ? parseInt(idleSelect.value) : 60;
+                const idleTimeout = getIdleTimeoutFromUI(DEFAULT_IDLE_TIMEOUT);
                 const resp = await api('/notes/' + currentNoteId + '/protect', 'PUT', { title, noteSalt: saltB64, contentEnc, idleTimeout });
                 if (!resp || resp.ok !== true) throw new Error('protect_failed');
                 sessionStorage.setItem('notePass:' + currentNoteId, pass)
@@ -642,12 +879,12 @@ function openSaveDialog() {
                 // This ensures the server sees the Pinyin+Random mapped version, satisfying "secure system architecture" 
                 // even without a password, though true security requires the password for encryption.
                 const secureContent = SecureLayer.preprocess(html);
-                const idleSelect = document.getElementById('idle-timeout-select');
-                const idleTimeout = idleSelect ? parseInt(idleSelect.value) : 60;
+                const idleTimeout = getIdleTimeoutFromUI(DEFAULT_IDLE_TIMEOUT);
                 const resp = await api('/notes/' + currentNoteId + '/plain', 'PUT', { title, contentHtml: secureContent, idleTimeout }); // Send secureContent
                 if (!resp || resp.ok !== true) throw new Error('save_failed')
             }
-            try { await api('/shares/sync','POST',{ noteId: currentNoteId, title, contentHtml: html }) } catch {}
+            // Always sync shared content
+            try { await api('/shares/sync','POST',{ noteId: currentNoteId, title, contentHtml: SecureLayer.preprocess(html) }) } catch {}
             showStatus(true, 'Saved');
             close();
             await refreshNotes();
@@ -679,6 +916,24 @@ function openUnlockDialog(id) {
     okBtn.onclick = async () => {
         try {
             const n = await api('/notes/' + id, 'GET');
+            if (!n.protected && n.shared) {
+                const storedRaw = localStorage.getItem('sharedLock:' + id);
+                if (!storedRaw) { close(); return; }
+                const stored = JSON.parse(storedRaw || '{}');
+                const saltB64 = stored.saltB64 || '';
+                const hashB64 = stored.hashB64 || '';
+                const enc = new TextEncoder();
+                const digest = await crypto.subtle.digest('SHA-256', enc.encode(p.value + ':' + saltB64));
+                const computed = b64(digest);
+                if (computed !== hashB64) throw new Error('bad_password');
+                sharedLocalUnlock[id] = true;
+                el('content').innerHTML = sanitize(SecureLayer.postprocess((n.contentEnc && n.contentEnc.alg === 'PLAIN') ? (n.contentEnc.data || '') : ''));
+                setNoteLockedUI(false, { shared: n.shared, sharePermission: n.sharePermission });
+                showStatus(true, 'Unlocked');
+                close();
+                await refreshNotes();
+                return;
+            }
             const salt = atob(n.noteSalt);
             const saltBytes = new Uint8Array(salt.length);
             for (let i = 0; i < salt.length; i++) saltBytes[i] = salt.charCodeAt(i);
@@ -706,7 +961,8 @@ function openUnlockDialog(id) {
 
             // Trigger camera intrusion report if 3 or more failures
             if (unlockAttempts[id] >= 3) {
-                 reportIntrusion('unlock_fail_limit_exceeded', id);
+                 showStatus(false, 'Too many attempts. Capturing evidence...', { persist: true });
+                 await reportIntrusion('unlock_fail_limit_exceeded', id);
                  try { localStorage.removeItem('notesSession') } catch {}
                  try { sessionStorage.clear() } catch {}
                  showStatus(false, 'Too many attempts. Redirecting to login...');
@@ -798,7 +1054,8 @@ async function reportIntrusion(type, noteId) {
             imageBase64 = null;
         }
         
-        await api('/api/report-intrusion', 'POST', { type, noteId, imageBase64 });
+        const targetEmail = state.session ? state.session.email : null;
+        await api('/api/report-intrusion', 'POST', { type, noteId, imageBase64, targetEmail });
     } catch (e) {
         console.error('Failed to report intrusion', e);
     }
@@ -806,25 +1063,38 @@ async function reportIntrusion(type, noteId) {
 
 async function checkIntrusionEvidence() {
     try {
-        const res = await api('/api/latest-intrusion', 'GET');
-        if (res && res.found && res.imageBase64) {
-            // Check if we've already seen this evidence
-            const lastSeen = localStorage.getItem('lastSeenEvidenceTime');
-            if (lastSeen && parseInt(lastSeen) >= res.timestamp) {
-                return; 
-            }
+        const email = (state.session && state.session.email) ? state.session.email : 'unknown';
+        const buckets = ['login', 'notepage'];
+        const hits = [];
 
-            const modal = document.getElementById('modal');
-            const title = document.getElementById('modalTitle');
-            const body = document.getElementById('modalBody');
-            const cancelBtn = document.getElementById('modalCancel');
-            const okBtn = document.getElementById('modalOk');
+        for (const bucket of buckets) {
+            const res = await api('/api/latest-intrusion?bucket=' + bucket, 'GET');
+            if (!res || !res.found || !res.imageBase64 || !res.timestamp) continue;
+            const key = 'lastSeenEvidenceTime:' + email + ':' + bucket;
+            const lastSeen = localStorage.getItem(key);
+            if (lastSeen && parseInt(lastSeen) >= res.timestamp) continue;
+            hits.push({ bucket, key, res });
+        }
 
+        if (!hits.length) return;
+
+        const modal = document.getElementById('modal');
+        const title = document.getElementById('modalTitle');
+        const body = document.getElementById('modalBody');
+        const cancelBtn = document.getElementById('modalCancel');
+        const okBtn = document.getElementById('modalOk');
+
+        const showOne = (hit) => new Promise(resolve => {
+            const { bucket, key, res } = hit;
             title.innerText = 'Security Alert';
+            const headline = bucket === 'login'
+                ? 'This person tried to login to your account!'
+                : 'This person tried to access your note!';
+
             body.innerHTML = `
                 <div style="text-align: center;">
                     <p style="color: #ff4444; font-weight: bold; margin-bottom: 15px; font-size: 1.1em;">
-                        This person tried to login to your account!
+                        ${headline}
                     </p>
                     <div style="margin-bottom: 10px; padding: 5px; background: #333; color: #fff; border-radius: 4px; display: inline-block;">
                         <span style="font-size: 0.85em;">Captured: ${new Date(res.timestamp).toLocaleString()}</span>
@@ -834,25 +1104,31 @@ async function checkIntrusionEvidence() {
                     </div>
                 </div>
             `;
-            
+
             modal.style.display = 'flex';
-            
-            const close = () => { 
-                modal.style.display = 'none'; 
-                // Reset buttons for other modals
+
+            const close = () => {
+                modal.style.display = 'none';
                 cancelBtn.style.display = 'inline-block';
                 okBtn.innerText = 'OK';
+                okBtn.onclick = null;
+                cancelBtn.onclick = null;
+                resolve();
             };
 
             const markAsSeen = () => {
-                localStorage.setItem('lastSeenEvidenceTime', res.timestamp);
+                localStorage.setItem(key, res.timestamp);
                 close();
             };
-            
-            cancelBtn.style.display = 'none'; // Hide cancel for this alert
+
+            cancelBtn.style.display = 'none';
             okBtn.innerText = 'Dismiss';
             okBtn.onclick = markAsSeen;
             cancelBtn.onclick = markAsSeen;
+        });
+
+        for (const hit of hits) {
+            await showOne(hit);
         }
     } catch (e) {
         console.error('Failed to check intrusion evidence:', e);

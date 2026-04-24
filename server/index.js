@@ -367,74 +367,37 @@ app.post('/auth/unblock-verify', (req, res) => {
 
 // Endpoint to report suspicious behavior (e.g., failed unlock) and upload evidence (screenshot/camera)
 app.post('/api/report-intrusion', (req, res) => {
-    const { type, imageBase64, noteId, details } = req.body || {};
+    const { type, imageBase64, noteId, details, targetEmail } = req.body || {};
     const ip = req.ip || req.connection.remoteAddress;
     
-    // Log the event (including normal events if sent here)
-    logIntrusion(type === 'normal_event' ? 'CLIENT_EVENT' : 'CLIENT_REPORTED_INTRUSION', { type, ip, noteId, details });
+    logIntrusion(type === 'normal_event' ? 'CLIENT_EVENT' : 'CLIENT_REPORTED_INTRUSION', { type, ip, noteId, details, targetEmail });
     
-    // Save evidence image if provided
     if (imageBase64) {
         const matches = imageBase64.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
         if (matches && matches.length === 3) {
             const ext = matches[1].split('/')[1] || 'png';
             const buffer = Buffer.from(matches[2], 'base64');
-            const filename = `evidence_${Date.now()}_${type}_${Math.random().toString(36).substring(7)}.${ext}`;
-            const filepath = path.join(process.cwd(), 'logs', filename);
+            const safeEmail = targetEmail ? Buffer.from(targetEmail).toString('hex') : 'unknown';
+            const folder = type === 'login_fail' ? 'login' : ((type === 'unlock_fail' || type === 'unlock_fail_limit_exceeded') ? 'notepage' : 'other');
+            const baseDir = path.join(process.cwd(), 'logs', folder);
+            const uniqueSuffix = Math.random().toString(36).slice(2, 8);
+            const filename = `evidence_${Date.now()}_${type}_${safeEmail}_${uniqueSuffix}.${ext}`;
+            const filepath = path.join(baseDir, filename);
             try {
+                fs.mkdirSync(baseDir, { recursive: true });
                 fs.writeFileSync(filepath, buffer);
-                logIntrusion('EVIDENCE_SAVED', { filename });
-
-                // Email sending removed as per user request
-                // sendEmailAlert('INTRUSION_EVIDENCE', ip, { ...details, type, filename }, null, imageBase64);
-
+                logIntrusion('EVIDENCE_SAVED', { filename, folder });
             } catch (e) {
                 console.error('Failed to save evidence:', e);
             }
         }
     }
     
-    // If it's a login failure or unlock failure, record for IP blocking
     if (type === 'login_fail' || type === 'unlock_fail' || type === 'unlock_fail_limit_exceeded') {
         recordFailure(ip);
     }
     
     res.json({ ok: true });
-});
-
-app.get('/api/latest-intrusion', (req, res) => {
-    const logsDir = path.join(process.cwd(), 'logs');
-    try {
-        if (!fs.existsSync(logsDir)) {
-            return res.json({ found: false });
-        }
-        
-        const files = fs.readdirSync(logsDir)
-            .filter(f => f.startsWith('evidence_') && (f.endsWith('.jpg') || f.endsWith('.png') || f.endsWith('.jpeg')))
-            .map(f => {
-                const stat = fs.statSync(path.join(logsDir, f));
-                return { name: f, time: stat.mtime.getTime() };
-            })
-            .sort((a, b) => b.time - a.time);
-
-        if (files.length > 0) {
-            const latest = files[0];
-            const content = fs.readFileSync(path.join(logsDir, latest.name));
-            const base64 = content.toString('base64');
-            const ext = latest.name.split('.').pop();
-            return res.json({ 
-                found: true, 
-                filename: latest.name, 
-                imageBase64: `data:image/${ext};base64,${base64}`,
-                timestamp: latest.time
-            });
-        }
-        
-        res.json({ found: false });
-    } catch (e) {
-        console.error('Error fetching evidence:', e);
-        res.status(500).json({ error: 'Failed to fetch evidence' });
-    }
 });
 
 db.exec(`
@@ -476,7 +439,7 @@ CREATE TABLE IF NOT EXISTS notes(
   size_padded INTEGER NOT NULL,
   protected INTEGER NOT NULL DEFAULT 0,
   note_salt TEXT,
-  idle_timeout INTEGER DEFAULT 60,
+  idle_timeout INTEGER DEFAULT 10,
   shared INTEGER NOT NULL DEFAULT 0,
   share_permission TEXT,
   FOREIGN KEY(user_id) REFERENCES users(id)
@@ -533,7 +496,7 @@ try { db.exec('ALTER TABLE notes ADD COLUMN protected INTEGER NOT NULL DEFAULT 0
 try { db.exec('ALTER TABLE notes ADD COLUMN note_salt TEXT') } catch(e) {}
 try { db.exec('ALTER TABLE notes ADD COLUMN shared INTEGER NOT NULL DEFAULT 0') } catch(e) {}
 try { db.exec('ALTER TABLE notes ADD COLUMN share_permission TEXT') } catch(e) {}
-try { db.exec('ALTER TABLE notes ADD COLUMN idle_timeout INTEGER DEFAULT 60') } catch(e) {}
+try { db.exec('ALTER TABLE notes ADD COLUMN idle_timeout INTEGER DEFAULT 10') } catch(e) {}
 try { db.exec('ALTER TABLE shares ADD COLUMN nk_envelope_for_link TEXT') } catch(e) {}
 try { db.exec('ALTER TABLE shares ADD COLUMN share_token TEXT UNIQUE') } catch(e) {}
 try { db.exec("ALTER TABLE shares ADD COLUMN permission TEXT DEFAULT 'ro'") } catch(e) {}
@@ -576,6 +539,17 @@ function auth(req, res, next) {
 function audit(userId, action, resourceId, req) {
   db.prepare('INSERT INTO audit(user_id, action, resource_id, ts, ip, ua, device_id) VALUES(?,?,?,?,?,?,?)')
     .run(userId || null, action, resourceId || null, now(), req.ip || null, req.get('user-agent') || null, req.user?.deviceId || null)
+}
+
+function isRecipientReadOnlyShare(noteId, userId) {
+  const row = db.prepare("SELECT 1 AS ok FROM shares WHERE accepted=1 AND accepted_note_id=? AND recipient_id=? AND (permission IS NULL OR permission='ro') LIMIT 1").get(noteId, userId)
+  return !!row
+}
+
+function hasAcceptedRecipientNote(shareRow) {
+  if (!shareRow || !shareRow.accepted || !shareRow.accepted_note_id) return false
+  const note = db.prepare('SELECT id FROM notes WHERE id=? AND user_id=?').get(shareRow.accepted_note_id, shareRow.recipient_id)
+  return !!note
 }
 
 app.post('/auth/register', (req, res) => {
@@ -691,8 +665,8 @@ app.post('/notes', auth, (req, res) => {
   const { titleEnc, contentEnc, noteKeyEnvelope } = req.body || {}
   if (!titleEnc || !contentEnc || !noteKeyEnvelope) return res.status(400).json({ error: 'invalid' })
   const sizePadded = Buffer.from(contentEnc.ciphertext || '').length
-  const info = db.prepare('INSERT INTO notes(user_id, created_at, updated_at, title_encrypted, note_key_envelope, size_padded) VALUES(?,?,?,?,?,?)')
-    .run(req.user.id, now(), now(), JSON.stringify(titleEnc), JSON.stringify(noteKeyEnvelope), sizePadded)
+  const info = db.prepare('INSERT INTO notes(user_id, created_at, updated_at, title_encrypted, note_key_envelope, size_padded, idle_timeout) VALUES(?,?,?,?,?,?,?)')
+    .run(req.user.id, now(), now(), JSON.stringify(titleEnc), JSON.stringify(noteKeyEnvelope), sizePadded, 10)
   const noteId = info.lastInsertRowid
   db.prepare('INSERT INTO note_blobs(note_id, chunk_index, blob_encrypted) VALUES(?,?,?)')
     .run(noteId, 0, Buffer.from(JSON.stringify(contentEnc)))
@@ -703,8 +677,8 @@ app.post('/notes', auth, (req, res) => {
 app.post('/notes/plain', auth, (req, res) => {
   const { title, contentHtml } = req.body || {}
   if (typeof title !== 'string' || typeof contentHtml !== 'string') return res.status(400).json({ error: 'invalid' })
-  const info = db.prepare('INSERT INTO notes(user_id, created_at, updated_at, title_plain, title_encrypted, note_key_envelope, size_padded, protected) VALUES(?,?,?,?,?,?,?,0)')
-    .run(req.user.id, now(), now(), title, JSON.stringify({ alg: 'PLAIN' }), JSON.stringify(null), Buffer.byteLength(contentHtml))
+  const info = db.prepare('INSERT INTO notes(user_id, created_at, updated_at, title_plain, title_encrypted, note_key_envelope, size_padded, protected, idle_timeout) VALUES(?,?,?,?,?,?,?,0,?)')
+    .run(req.user.id, now(), now(), title, JSON.stringify({ alg: 'PLAIN' }), JSON.stringify(null), Buffer.byteLength(contentHtml), 10)
   const noteId = info.lastInsertRowid
   const blob = { alg: 'PLAIN', data: contentHtml }
   db.prepare('INSERT INTO note_blobs(note_id, chunk_index, blob_encrypted) VALUES(?,?,?)')
@@ -715,11 +689,12 @@ app.post('/notes/plain', auth, (req, res) => {
 
 app.put('/notes/:id', auth, (req, res) => {
   const { titleEnc, contentEnc, idleTimeout } = req.body || {}
+  if (isRecipientReadOnlyShare(req.params.id, req.user.id)) return res.status(403).json({ error: 'read_only_share' })
   const note = db.prepare('SELECT id FROM notes WHERE id=? AND user_id=?').get(req.params.id, req.user.id)
   if (!note) return res.status(404).json({ error: 'not_found' })
   const sizePadded = Buffer.from(contentEnc.ciphertext || '').length
   db.prepare('UPDATE notes SET title_encrypted=?, updated_at=?, size_padded=?, idle_timeout=? WHERE id=?')
-    .run(JSON.stringify(titleEnc), now(), sizePadded, idleTimeout || 60, note.id)
+    .run(JSON.stringify(titleEnc), now(), sizePadded, idleTimeout || 10, note.id)
   db.prepare('UPDATE note_blobs SET blob_encrypted=? WHERE note_id=? AND chunk_index=0')
     .run(Buffer.from(JSON.stringify(contentEnc)), note.id)
   audit(req.user.id, 'update_note', String(note.id), req)
@@ -728,10 +703,11 @@ app.put('/notes/:id', auth, (req, res) => {
 
 app.put('/notes/:id/plain', auth, (req, res) => {
   const { title, contentHtml, idleTimeout } = req.body || {}
+  if (isRecipientReadOnlyShare(req.params.id, req.user.id)) return res.status(403).json({ error: 'read_only_share' })
   const note = db.prepare('SELECT id FROM notes WHERE id=? AND user_id=?').get(req.params.id, req.user.id)
   if (!note) return res.status(404).json({ error: 'not_found' })
   db.prepare('UPDATE notes SET title_plain=?, protected=0, updated_at=?, size_padded=?, idle_timeout=? WHERE id=?')
-    .run(title, now(), Buffer.byteLength(contentHtml || ''), idleTimeout || 60, note.id)
+    .run(title, now(), Buffer.byteLength(contentHtml || ''), idleTimeout || 10, note.id)
   const blob = { alg: 'PLAIN', data: contentHtml || '' }
   db.prepare('UPDATE note_blobs SET blob_encrypted=? WHERE note_id=? AND chunk_index=0')
     .run(Buffer.from(JSON.stringify(blob)), note.id)
@@ -739,8 +715,21 @@ app.put('/notes/:id/plain', auth, (req, res) => {
   res.json({ ok: true })
 })
 
+app.put('/notes/:id/idle-timeout', auth, (req, res) => {
+  const { idleTimeout } = req.body || {}
+  const t = Number(idleTimeout)
+  if (!Number.isFinite(t) || t <= 0) return res.status(400).json({ error: 'invalid' })
+  const note = db.prepare('SELECT id FROM notes WHERE id=? AND user_id=?').get(req.params.id, req.user.id)
+  if (!note) return res.status(404).json({ error: 'not_found' })
+  db.prepare('UPDATE notes SET idle_timeout=?, updated_at=? WHERE id=?')
+    .run(Math.floor(t), now(), note.id)
+  audit(req.user.id, 'update_idle_timeout', String(note.id), req)
+  res.json({ ok: true })
+})
+
 app.put('/notes/:id/protect', auth, (req, res) => {
   const { title, noteSalt, contentEnc } = req.body || {}
+  if (isRecipientReadOnlyShare(req.params.id, req.user.id)) return res.status(403).json({ error: 'read_only_share' })
   const note = db.prepare('SELECT id FROM notes WHERE id=? AND user_id=?').get(req.params.id, req.user.id)
   if (!note) return res.status(404).json({ error: 'not_found' })
   const sizePadded = Buffer.from(contentEnc.ciphertext || '').length
@@ -768,17 +757,28 @@ app.post('/search/reindex', auth, (req, res) => {
 })
 
 app.get('/notes', auth, (req, res) => {
-  const rows = db.prepare('SELECT id, updated_at, title_encrypted, title_plain, size_padded, protected, shared, share_permission FROM notes WHERE user_id=? ORDER BY updated_at DESC').all(req.user.id)
-  const items = rows.map(r => ({ id: r.id, updatedAt: r.updated_at, titleEnc: r.title_encrypted ? JSON.parse(r.title_encrypted) : null, titlePlain: r.title_plain || null, sizePadded: r.size_padded, protected: r.protected, shared: r.shared || 0, sharePermission: r.share_permission || null }))
+  const rows = db.prepare(`
+    SELECT 
+      id, updated_at, title_encrypted, title_plain, size_padded, protected, shared, share_permission,
+      EXISTS(
+        SELECT 1 FROM shares s 
+        WHERE s.accepted=1 AND s.accepted_note_id=notes.id AND s.recipient_id=? AND (s.permission IS NULL OR s.permission='ro')
+      ) AS recipient_read_only
+    FROM notes 
+    WHERE user_id=? 
+    ORDER BY updated_at DESC
+  `).all(req.user.id, req.user.id)
+  const items = rows.map(r => ({ id: r.id, updatedAt: r.updated_at, titleEnc: r.title_encrypted ? JSON.parse(r.title_encrypted) : null, titlePlain: r.title_plain || null, sizePadded: r.size_padded, protected: r.protected, shared: r.shared || 0, sharePermission: r.share_permission || null, recipientReadOnly: !!r.recipient_read_only }))
   res.json({ items })
 })
 
 app.get('/notes/:id', auth, (req, res) => {
   const note = db.prepare('SELECT * FROM notes WHERE id=? AND user_id=?').get(req.params.id, req.user.id)
   if (!note) return res.status(404).json({ error: 'not_found' })
+  const recipientReadOnly = isRecipientReadOnlyShare(note.id, req.user.id)
   const blob = db.prepare('SELECT blob_encrypted FROM note_blobs WHERE note_id=? ORDER BY chunk_index ASC').get(note.id)
   const content = JSON.parse(blob.blob_encrypted.toString())
-  res.json({ id: note.id, protected: note.protected, noteSalt: note.note_salt || null, titlePlain: note.title_plain || null, noteKeyEnvelope: note.note_key_envelope ? JSON.parse(note.note_key_envelope) : null, titleEnc: note.title_encrypted ? JSON.parse(note.title_encrypted) : null, contentEnc: content, shared: note.shared || 0, sharePermission: note.share_permission || null, idleTimeout: note.idle_timeout || 60, updatedAt: note.updated_at })
+  res.json({ id: note.id, protected: note.protected, noteSalt: note.note_salt || null, titlePlain: note.title_plain || null, noteKeyEnvelope: note.note_key_envelope ? JSON.parse(note.note_key_envelope) : null, titleEnc: note.title_encrypted ? JSON.parse(note.title_encrypted) : null, contentEnc: content, shared: note.shared || 0, sharePermission: note.share_permission || null, recipientReadOnly, idleTimeout: note.idle_timeout || 10, updatedAt: note.updated_at })
 })
 
 app.post('/search/index', auth, (req, res) => {
@@ -807,11 +807,50 @@ app.post('/shares', auth, (req, res) => {
   if (!note) return res.status(404).json({ error: 'not_found' })
   const rec = db.prepare('SELECT id FROM users WHERE email=?').get(recipientEmail)
   if (!rec) return res.status(404).json({ error: 'recipient_not_found' })
+  const normalizedPermission = permission === 'rw' ? 'rw' : 'ro'
+  let existing = db.prepare(`
+    SELECT * FROM shares
+    WHERE note_id=? AND owner_id=? AND recipient_id=?
+    ORDER BY accepted DESC, id DESC
+    LIMIT 1
+  `).get(noteId, req.user.id, rec.id)
+  if (existing && existing.accepted && existing.accepted_note_id && !hasAcceptedRecipientNote(existing)) {
+    db.prepare('DELETE FROM shares WHERE note_id=? AND owner_id=? AND recipient_id=?').run(noteId, req.user.id, rec.id)
+    existing = null
+  }
+  if (existing) {
+    if ((existing.permission || 'ro') === normalizedPermission) {
+      return res.json({
+        ok: true,
+        status: 'same_permission',
+        permission: normalizedPermission
+      })
+    }
+    db.prepare(`
+      UPDATE shares
+      SET permission=?, nk_envelope_for_link=?
+      WHERE note_id=? AND owner_id=? AND recipient_id=?
+    `).run(normalizedPermission, JSON.stringify(nkEnvelopeForLink), noteId, req.user.id, rec.id)
+    db.prepare(`
+      UPDATE notes
+      SET shared=1, share_permission=?
+      WHERE id IN (
+        SELECT accepted_note_id FROM shares
+        WHERE note_id=? AND owner_id=? AND recipient_id=? AND accepted=1 AND accepted_note_id IS NOT NULL
+      ) AND user_id=?
+    `).run(normalizedPermission, noteId, req.user.id, rec.id, rec.id)
+    audit(req.user.id, 'update_share_permission', String(noteId), req)
+    return res.json({
+      ok: true,
+      status: 'permission_updated',
+      permission: normalizedPermission
+    })
+  }
   const token = crypto.randomBytes(24).toString('hex')
   const info = db.prepare('INSERT INTO shares(note_id, owner_id, recipient_id, nk_envelope_for_link, share_token, permission, created_at) VALUES(?,?,?,?,?,?,?)')
-    .run(noteId, req.user.id, rec.id, JSON.stringify(nkEnvelopeForLink), token, (permission === 'rw' ? 'rw' : 'ro'), now())
+    .run(noteId, req.user.id, rec.id, JSON.stringify(nkEnvelopeForLink), token, normalizedPermission, now())
   audit(req.user.id, 'share_note', String(noteId), req)
-  res.json({ id: info.lastInsertRowid, token })
+  res.json({ ok: true, status: 'created', id: info.lastInsertRowid, token, permission: normalizedPermission })
 })
 
 app.get('/shares/:token', auth, (req, res) => {
@@ -820,8 +859,11 @@ app.get('/shares/:token', auth, (req, res) => {
   if (share.recipient_id !== req.user.id) return res.status(403).json({ error: 'forbidden' })
   const note = db.prepare('SELECT * FROM notes WHERE id=?').get(share.note_id)
   const blob = db.prepare('SELECT blob_encrypted FROM note_blobs WHERE note_id=? ORDER BY chunk_index ASC').get(note.id)
+  const accepted = hasAcceptedRecipientNote(share)
   res.json({
     noteId: note.id,
+    accepted,
+    acceptedNoteId: accepted ? (share.accepted_note_id || null) : null,
     nkEnvelopeForLink: JSON.parse(share.nk_envelope_for_link),
     titlePlain: note.title_plain || null,
     permission: share.permission || 'ro',
@@ -880,12 +922,56 @@ app.delete('/notes/:id', auth, (req, res) => {
     db.prepare('DELETE FROM note_blobs WHERE note_id=?').run(id)
     db.prepare('DELETE FROM blind_index WHERE note_id=? AND user_id=?').run(id, req.user.id)
     db.prepare('DELETE FROM shares WHERE note_id=? AND owner_id=?').run(id, req.user.id)
+    db.prepare('DELETE FROM shares WHERE accepted_note_id=? AND recipient_id=?').run(id, req.user.id)
     db.prepare('DELETE FROM notes WHERE id=?').run(id)
   })
   tx(note.id)
   audit(req.user.id, 'delete_note', String(note.id), req)
   res.json({ ok: true })
 })
+
+app.get('/api/latest-intrusion', auth, (req, res) => {
+    const bucket = (req.query.bucket === 'login' || req.query.bucket === 'notepage') ? String(req.query.bucket) : null;
+    if (!bucket) return res.json({ found: false });
+    const logsDir = path.join(process.cwd(), 'logs', bucket);
+    try {
+        if (!fs.existsSync(logsDir)) {
+            return res.json({ found: false });
+        }
+        
+        const user = db.prepare('SELECT email FROM users WHERE id=?').get(req.user.id);
+        if (!user) return res.json({ found: false });
+        
+        const targetEmailHex = Buffer.from(user.email).toString('hex');
+        
+        const files = fs.readdirSync(logsDir)
+            .filter(f => f.startsWith('evidence_') && f.includes(targetEmailHex) && (f.endsWith('.jpg') || f.endsWith('.png') || f.endsWith('.jpeg')))
+            .map(f => {
+                const stat = fs.statSync(path.join(logsDir, f));
+                return { name: f, time: stat.mtime.getTime() };
+            })
+            .sort((a, b) => b.time - a.time);
+
+        if (files.length > 0) {
+            const latest = files[0];
+            const content = fs.readFileSync(path.join(logsDir, latest.name));
+            const base64 = content.toString('base64');
+            const ext = latest.name.split('.').pop();
+            return res.json({ 
+                found: true, 
+                filename: latest.name, 
+                bucket,
+                imageBase64: `data:image/${ext};base64,${base64}`,
+                timestamp: latest.time
+            });
+        }
+        
+        res.json({ found: false });
+    } catch (e) {
+        console.error('Error fetching evidence:', e);
+        res.status(500).json({ error: 'Failed to fetch evidence' });
+    }
+});
 
 app.get('/', (req, res) => {
   res.redirect('/login')
@@ -900,4 +986,3 @@ app.use('/', express.static(path.join(process.cwd(), 'client')))
 
 const port = process.env.PORT || 3333
 app.listen(port, () => { console.log(`listening ${port}`) })
-
